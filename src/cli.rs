@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 use margin_api::{AppState, router};
 use margin_data::{
     AppConfig, AppStore, ConfigFile, DatasetReadModel, IngestReceipt, NseReportKind, PgStore,
-    RuntimeEnv, assemble, connect, ingest_nse_report, migrate, verified_nse_source,
+    RuntimeEnv, assemble, connect, ingest_iccl_files, ingest_nse_report, migrate,
+    verified_nse_source,
 };
 use margin_domain::OFFICIAL_CALCULATION_IMPLEMENTED;
 use uuid::Uuid;
@@ -64,7 +65,7 @@ pub enum Command {
     Serve,
     /// Download one verified NSE report and archive the original bytes.
     ///
-    /// SPAN risk arrays are not loaded. ICCL stays disabled.
+    /// NSE stores one report. ICCL stores the day's SPAN snapshots and the extreme-loss file.
     Ingest {
         /// `NSE` for the verified NSE reports adapter, or `ICCL`.
         #[arg(long)]
@@ -84,10 +85,13 @@ pub enum Command {
     },
     /// List archived risk datasets.
     ListDatasets,
-    /// Compare a calculation with a reference result.
+    /// Compare this quote with an operator reference for one SPAN file.
+    ///
+    /// A match leaves the equivalence claim at none.
     Reconcile {
+        /// JSON reference: trade time, SPAN filename or SHA-256, positions, and expected amounts.
         #[arg(long)]
-        date: String,
+        reference: String,
     },
     /// Replay a portfolio against the dataset for its original trade date.
     Replay {
@@ -159,9 +163,8 @@ pub async fn execute(
             Err(not_operational("validate-dataset"))
         }
         Command::ListDatasets => list_datasets(&store).await,
-        Command::Reconcile { date } => {
-            let _ = parse_date(&date)?;
-            Err(not_operational("reconcile"))
+        Command::Reconcile { reference } => {
+            crate::reconcile::reconcile(reference, &config, &store).await
         }
         Command::Replay { input, date } => {
             if input.trim().is_empty() {
@@ -172,6 +175,18 @@ pub async fn execute(
             let _ = parse_date(&date)?;
             Err(not_operational("replay"))
         }
+    }
+}
+
+fn postgres_store(store: &AppStore) -> Result<&PgStore, EngineError> {
+    match store {
+        AppStore::Postgres(store) => Ok(store),
+        AppStore::Unavailable { reason } => Err(EngineError::Failed {
+            detail: reason.clone(),
+        }),
+        AppStore::Memory(_) => Err(EngineError::Failed {
+            detail: "ingest requires PostgreSQL".to_owned(),
+        }),
     }
 }
 
@@ -195,10 +210,37 @@ async fn ingest(
         None => None,
     };
     if source == IngestSource::Iccl {
-        return Err(EngineError::NotOperational {
-            command: "ingest",
-            detail: "ICCL risk-parameter download is an HTML form and no file response has been captured",
-        });
+        if kind.is_some() {
+            return Err(EngineError::InvalidArgument {
+                detail: "ICCL ingest does not take --kind".to_owned(),
+            });
+        }
+        let store = postgres_store(store)?;
+        let receipts = ingest_iccl_files(config, store, trading_date)
+            .await
+            .map_err(|error| EngineError::Failed {
+                detail: error.to_string(),
+            })?;
+        if receipts.is_empty() {
+            println!("equivalence_claim=none");
+            println!("official_calculation_implemented={OFFICIAL_CALCULATION_IMPLEMENTED}");
+            println!("disposition=present");
+            println!(
+                "note=ICCL SPAN and extreme loss files for {trading_date} are already archived"
+            );
+            return Ok(());
+        }
+        let mut failed = None;
+        for receipt in &receipts {
+            print_receipt(receipt);
+            if !receipt.accepted {
+                failed = Some(receipt.note.clone());
+            }
+        }
+        return match failed {
+            Some(detail) => Err(EngineError::Failed { detail }),
+            None => Ok(()),
+        };
     }
     let Some(kind) = kind else {
         return Err(EngineError::InvalidArgument {

@@ -8,8 +8,9 @@
 //! onto contracts.
 
 use crate::DataError;
-use crate::span_xml::{SpanXmlReport, parse_span_xml};
-use crate::zip_safe::{ZipLimits, extract_zip_to_memory};
+
+pub(crate) use crate::download::media_type_matches;
+pub(crate) use crate::span::xml::check_span_container;
 use chrono::{Datelike, NaiveDate};
 use flate2::read::GzDecoder;
 use margin_domain::SnapshotLocator;
@@ -26,7 +27,6 @@ pub const NSE_SESSION_REFERER: &str = "https://www.nseindia.com/";
 pub const NSE_REFERER: &str = "https://www.nseindia.com/all-reports-derivatives";
 pub const NSE_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 pub const SPAN_FILE_FORMAT: &str = "nse-span-xml-4.00-zip";
-pub const PARSER_VERSION: &str = "span-xml-4.00";
 
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -272,16 +272,6 @@ pub fn display_date(trading_date: NaiveDate) -> String {
     )
 }
 
-pub fn media_type_matches(header: &str, allowed: &[&str]) -> bool {
-    let media = header
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    allowed.iter().any(|expected| media == *expected)
-}
-
 pub fn content_disposition_filename(header: &str) -> Result<String, DataError> {
     for part in header.split(';') {
         let part = part.trim();
@@ -307,31 +297,6 @@ pub fn content_disposition_filename(header: &str) -> Result<String, DataError> {
     Err(DataError::DownloadRejected {
         detail: "response did not name the downloaded file".to_owned(),
     })
-}
-
-pub(crate) fn check_span_container(
-    bytes: &[u8],
-    expected_member: &str,
-    max_uncompressed_bytes: u64,
-    trading_date: NaiveDate,
-) -> Result<SpanXmlReport, String> {
-    let entries = extract_zip_to_memory(bytes, ZipLimits::conservative(max_uncompressed_bytes))
-        .map_err(|error| error.to_string())?;
-    if entries.len() != 1 || entries[0].name != expected_member {
-        let found = if entries.is_empty() {
-            "no members".to_owned()
-        } else {
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        return Err(format!(
-            "SPAN zip member `{found}` did not match the verified name `{expected_member}`"
-        ));
-    }
-    parse_span_xml(&entries[0].bytes, trading_date)
 }
 
 pub fn check_exposure_csv(bytes: &[u8], trading_date: NaiveDate) -> Result<(), String> {

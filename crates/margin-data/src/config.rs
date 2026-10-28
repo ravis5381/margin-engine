@@ -471,7 +471,7 @@ mod tests {
             .expect("iccl source");
         assert!(nse.enabled());
         assert!(ensure_source_fetchable(nse, &config.download).is_ok());
-        assert!(!iccl.enabled());
-        assert!(ensure_source_fetchable(iccl, &config.download).is_err());
+        assert!(iccl.enabled());
+        assert!(ensure_source_fetchable(iccl, &config.download).is_ok());
     }
 }

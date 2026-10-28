@@ -144,7 +144,7 @@ fn official_origin_requires_a_host_and_synthetic_cannot_be_official() {
 }
 
 #[test]
-fn cli_ingest_keeps_iccl_disabled_and_nse_needs_a_database() {
+fn cli_ingest_needs_a_database_for_iccl_and_nse() {
     let output = Command::new(env!("CARGO_BIN_EXE_margin-engine"))
         .args(["ingest", "--source", "ICCL", "--date", "2026-10-28"])
         .env("MARGIN_ENGINE_SKIP_DOTENV", "1")
@@ -153,9 +153,9 @@ fn cli_ingest_keeps_iccl_disabled_and_nse_needs_a_database() {
         .env_remove("MARGIN_DATA_SOURCES")
         .output()
         .expect("run");
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).expect("stderr");
-    assert!(stderr.contains("not operational"));
+    assert!(stderr.contains("DATABASE_URL is not set"), "{stderr}");
 
     let invalid = Command::new(env!("CARGO_BIN_EXE_margin-engine"))
         .args(["ingest", "--source", "FOO", "--date", "2026-10-28"])
@@ -220,6 +220,39 @@ fn cli_ingest_keeps_iccl_disabled_and_nse_needs_a_database() {
     assert_eq!(needs_database.status.code(), Some(1));
     let stderr = String::from_utf8(needs_database.stderr).expect("stderr");
     assert!(stderr.contains("DATABASE_URL is not set"));
+}
+
+#[test]
+fn reconcile_rejects_a_bad_reference_before_it_quotes() {
+    let missing = Command::new(env!("CARGO_BIN_EXE_margin-engine"))
+        .args(["reconcile", "--reference", "missing-reference.json"])
+        .env("MARGIN_ENGINE_SKIP_DOTENV", "1")
+        .env_remove("DATABASE_URL")
+        .env_remove("MARGIN_CONFIG")
+        .env_remove("MARGIN_DATA_SOURCES")
+        .output()
+        .expect("missing reference");
+    assert_eq!(missing.status.code(), Some(2));
+    let stderr = String::from_utf8(missing.stderr).expect("stderr");
+    assert!(stderr.contains("could not be read"), "{stderr}");
+
+    let path = std::env::temp_dir().join("margin-engine-reference.json");
+    std::fs::write(
+        &path,
+        r#"{"source":"operator","exchange":"NSE","trading_datetime":"yesterday"}"#,
+    )
+    .expect("write");
+    let invalid = Command::new(env!("CARGO_BIN_EXE_margin-engine"))
+        .args(["reconcile", "--reference", path.to_str().expect("path")])
+        .env("MARGIN_ENGINE_SKIP_DOTENV", "1")
+        .env_remove("DATABASE_URL")
+        .env_remove("MARGIN_CONFIG")
+        .env_remove("MARGIN_DATA_SOURCES")
+        .output()
+        .expect("invalid reference");
+    assert_eq!(invalid.status.code(), Some(2));
+    let stderr = String::from_utf8(invalid.stderr).expect("stderr");
+    assert!(stderr.contains("reference JSON"), "{stderr}");
 }
 
 #[tokio::test]

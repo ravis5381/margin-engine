@@ -1,11 +1,7 @@
-use crate::ContractMaster;
 use crate::DataError;
-use crate::nse_reports::{NseReportKind, PARSER_VERSION, SPAN_FILE_FORMAT};
-use crate::span_quote::{
-    CashMarginRates, ContractElmRates, ExposureRates, MarginPosition, SpanMarginQuote,
-    quote_span_zip,
-};
-use crate::span_xml::span_created_timestamp;
+use crate::nse::reports::{NseReportKind, SPAN_FILE_FORMAT};
+use crate::span::quote::{MarginPosition, SpanMarginQuote};
+use crate::span::xml::{PARSER_VERSION, span_created_timestamp};
 use crate::store::{DatasetPage, DatasetReadModel, summarize};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use margin_domain::{
@@ -121,7 +117,7 @@ impl DatasetReadModel for PgStore {
 }
 
 #[derive(Debug, sqlx::FromRow)]
-struct SpanCandidate {
+pub(crate) struct SpanCandidate {
     id: Uuid,
     snapshot_class: String,
     intraday_sequence: Option<i32>,
@@ -130,6 +126,14 @@ struct SpanCandidate {
     publication_status: String,
     validation_status: String,
     prefix: Vec<u8>,
+}
+
+pub(crate) struct ChosenSpan<'a> {
+    pub chosen: &'a SpanCandidate,
+    pub span_created: NaiveDateTime,
+    pub trading_date: NaiveDate,
+    pub trading_datetime: NaiveDateTime,
+    pub bytes: &'a [u8],
 }
 
 pub struct StoredSpanQuote {
@@ -160,12 +164,13 @@ impl PgStore {
              FROM risk_datasets d \
              JOIN risk_files f ON f.sha256 = d.sha256 \
              WHERE d.exchange = $1 AND d.clearing_corporation = $2 AND d.trading_date = $3 \
-               AND d.origin = 'official' AND d.file_format = 'nse-span-xml-4.00-zip' \
+               AND d.origin = 'official' AND d.file_format = $4 \
                AND d.parser_version = 'span-xml-4.00'",
         )
         .bind(exchange.code())
         .bind(clearing.code())
         .bind(trading_date)
+        .bind(span_file_format(exchange))
         .fetch_all(&self.pool)
         .await
         .map_err(db_error_message)?;
@@ -175,208 +180,94 @@ impl PgStore {
             .fetch_one(&self.pool)
             .await
             .map_err(db_error_message)?;
-        let exposure_bytes = self.exposure_file(exchange, clearing, trading_date).await?;
-        let exposure = ExposureRates::parse_csv(&exposure_bytes, trading_date)
-            .map_err(|detail| DataError::MarginRejected { detail })?;
-        let contract_bytes = self
-            .contract_elm_file(exchange, clearing, trading_date)
-            .await?;
-        let contracts = ContractElmRates::parse_gzip(&contract_bytes)
-            .map_err(|detail| DataError::MarginRejected { detail })?;
-        let master_bytes = self
-            .contract_master_file(exchange, clearing, trading_date)
-            .await?;
-        let master = ContractMaster::parse_gzip(&master_bytes)
-            .map_err(|detail| DataError::MarginRejected { detail })?;
-        let cash = match self.cash_var_file(exchange, clearing, trading_date).await? {
-            Some(cash_bytes) => CashMarginRates::parse(&cash_bytes, trading_date)
-                .map_err(|detail| DataError::MarginRejected { detail })?,
-            None => CashMarginRates::default(),
-        };
-        let mut quote = quote_span_zip(
-            &bytes,
-            trading_date,
-            positions,
-            &exposure,
-            &contracts,
-            &cash,
-        )
-        .map_err(|detail| DataError::MarginRejected { detail })?;
-        quote
-            .apply_lot_sizes(&master)
-            .map_err(|detail| DataError::MarginRejected { detail })?;
-        Ok(StoredSpanQuote {
-            dataset_id: chosen.id,
+        let selected = ChosenSpan {
+            chosen,
+            span_created,
             trading_date,
             trading_datetime,
-            span_created,
-            snapshot_class: chosen.snapshot_class.clone(),
-            intraday_sequence: chosen
-                .intraday_sequence
-                .map(|sequence| u32::try_from(sequence).unwrap_or(u32::MAX)),
-            filename: chosen.original_filename.clone(),
-            sha256: chosen.sha256.clone(),
-            quote,
-        })
+            bytes: &bytes,
+        };
+        match exchange {
+            Exchange::Nse => self.quote_nse(clearing, &selected, positions).await,
+            Exchange::Bse => self.quote_iccl(&selected, positions).await,
+        }
+    }
+}
+
+pub(crate) fn finish_span_quote(
+    chosen: &SpanCandidate,
+    trading_date: NaiveDate,
+    trading_datetime: NaiveDateTime,
+    span_created: NaiveDateTime,
+    quote: SpanMarginQuote,
+) -> StoredSpanQuote {
+    StoredSpanQuote {
+        dataset_id: chosen.id,
+        trading_date,
+        trading_datetime,
+        span_created,
+        snapshot_class: chosen.snapshot_class.clone(),
+        intraday_sequence: chosen
+            .intraday_sequence
+            .map(|sequence| u32::try_from(sequence).unwrap_or(u32::MAX)),
+        filename: chosen.original_filename.clone(),
+        sha256: chosen.sha256.clone(),
+        quote,
+    }
+}
+
+pub(crate) fn one_auxiliary_hash(
+    rows: Vec<(String, Vec<u8>)>,
+    duplicate: String,
+) -> Result<Vec<u8>, DataError> {
+    let mut hashes: Vec<&str> = rows.iter().map(|(sha, _)| sha.as_str()).collect();
+    hashes.sort_unstable();
+    hashes.dedup();
+    if hashes.len() != 1 {
+        return Err(DataError::MarginRejected { detail: duplicate });
+    }
+    Ok(rows[0].1.clone())
+}
+
+fn span_file_format(exchange: Exchange) -> &'static str {
+    match exchange {
+        Exchange::Nse => SPAN_FILE_FORMAT,
+        Exchange::Bse => crate::iccl::ingest::ICCL_SPAN_FILE_FORMAT,
     }
 }
 
 impl PgStore {
-    async fn exposure_file(
+    pub(crate) async fn auxiliary_rows(
         &self,
         exchange: Exchange,
         clearing: ClearingCorporation,
         trading_date: NaiveDate,
-    ) -> Result<Vec<u8>, DataError> {
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        kind: &str,
+        check_status: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, DataError> {
+        sqlx::query_as(
             "SELECT sha256, content FROM official_auxiliary_files \
              WHERE exchange = $1 AND clearing_corporation = $2 AND trading_date = $3 \
-               AND kind = 'exposure_limit_csv' AND check_status = 'container_checked'",
+               AND kind = $4 AND check_status = $5",
         )
         .bind(exchange.code())
         .bind(clearing.code())
         .bind(trading_date)
+        .bind(kind)
+        .bind(check_status)
         .fetch_all(&self.pool)
         .await
-        .map_err(db_error_message)?;
-        if rows.is_empty() {
-            return Err(DataError::MarginRejected {
-                detail: format!(
-                    "no exposure file is archived for {trading_date}, so extreme loss margin is not calculated"
-                ),
-            });
-        }
-        let mut hashes: Vec<&str> = rows.iter().map(|(sha, _)| sha.as_str()).collect();
-        hashes.sort_unstable();
-        hashes.dedup();
-        if hashes.len() != 1 {
-            return Err(DataError::MarginRejected {
-                detail: format!("more than one exposure file hash is archived for {trading_date}"),
-            });
-        }
-        Ok(rows[0].1.clone())
+        .map_err(db_error_message)
     }
 
-    async fn contract_elm_file(
+    pub(crate) async fn span_snapshot_archived(
         &self,
         exchange: Exchange,
         clearing: ClearingCorporation,
         trading_date: NaiveDate,
-    ) -> Result<Vec<u8>, DataError> {
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT sha256, content FROM official_auxiliary_files \
-             WHERE exchange = $1 AND clearing_corporation = $2 AND trading_date = $3 \
-               AND kind = 'contract_elm_gzip' AND check_status = 'container_checked'",
-        )
-        .bind(exchange.code())
-        .bind(clearing.code())
-        .bind(trading_date)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error_message)?;
-        if rows.is_empty() {
-            return Err(DataError::MarginRejected {
-                detail: format!(
-                    "no contract ELM file is archived for {trading_date}, so extreme loss margin is not calculated"
-                ),
-            });
-        }
-        let mut hashes: Vec<&str> = rows.iter().map(|(sha, _)| sha.as_str()).collect();
-        hashes.sort_unstable();
-        hashes.dedup();
-        if hashes.len() != 1 {
-            return Err(DataError::MarginRejected {
-                detail: format!(
-                    "more than one contract ELM file hash is archived for {trading_date}"
-                ),
-            });
-        }
-        Ok(rows[0].1.clone())
-    }
-
-    async fn contract_master_file(
-        &self,
-        exchange: Exchange,
-        clearing: ClearingCorporation,
-        trading_date: NaiveDate,
-    ) -> Result<Vec<u8>, DataError> {
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT sha256, content FROM official_auxiliary_files \
-             WHERE exchange = $1 AND clearing_corporation = $2 AND trading_date = $3 \
-               AND kind = 'contract_master_gzip' AND check_status = 'container_checked'",
-        )
-        .bind(exchange.code())
-        .bind(clearing.code())
-        .bind(trading_date)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error_message)?;
-        if rows.is_empty() {
-            return Err(DataError::MarginRejected {
-                detail: format!("no contract master is archived for {trading_date}"),
-            });
-        }
-        let mut hashes: Vec<&str> = rows.iter().map(|(sha, _)| sha.as_str()).collect();
-        hashes.sort_unstable();
-        hashes.dedup();
-        if hashes.len() != 1 {
-            return Err(DataError::MarginRejected {
-                detail: format!(
-                    "more than one contract master hash is archived for {trading_date}"
-                ),
-            });
-        }
-        Ok(rows[0].1.clone())
-    }
-
-    async fn cash_var_file(
-        &self,
-        exchange: Exchange,
-        clearing: ClearingCorporation,
-        trading_date: NaiveDate,
-    ) -> Result<Option<Vec<u8>>, DataError> {
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT sha256, content FROM official_auxiliary_files \
-             WHERE exchange = $1 AND clearing_corporation = $2 AND trading_date = $3 \
-               AND kind = 'cash_var_dat' AND check_status = 'container_checked'",
-        )
-        .bind(exchange.code())
-        .bind(clearing.code())
-        .bind(trading_date)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error_message)?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        let mut hashes: Vec<&str> = rows.iter().map(|(sha, _)| sha.as_str()).collect();
-        hashes.sort_unstable();
-        hashes.dedup();
-        if hashes.len() != 1 {
-            return Err(DataError::MarginRejected {
-                detail: format!(
-                    "more than one cash-market VaR file hash is archived for {trading_date}"
-                ),
-            });
-        }
-        Ok(Some(rows[0].1.clone()))
-    }
-
-    pub(crate) async fn report_is_archived(
-        &self,
-        exchange: Exchange,
-        clearing: ClearingCorporation,
-        trading_date: NaiveDate,
-        kind: NseReportKind,
+        file_format: &str,
+        snapshot: &margin_domain::SnapshotLocator,
     ) -> Result<bool, DataError> {
-        if let Some(auxiliary_kind) = kind.auxiliary_kind() {
-            return self
-                .auxiliary_is_archived(exchange, clearing, trading_date, auxiliary_kind)
-                .await;
-        }
-        let Some(snapshot) = kind.snapshot() else {
-            return Ok(false);
-        };
         let sequence = snapshot
             .intraday_sequence()
             .map(|value| i32::try_from(value).unwrap_or(i32::MAX));
@@ -394,7 +285,7 @@ impl PgStore {
         .bind(exchange.code())
         .bind(clearing.code())
         .bind(trading_date)
-        .bind(SPAN_FILE_FORMAT)
+        .bind(file_format)
         .bind(PARSER_VERSION)
         .bind(snapshot.class().code())
         .bind(sequence)
@@ -402,6 +293,129 @@ impl PgStore {
         .await
         .map_err(db_error_message)?;
         Ok(present)
+    }
+
+    pub(crate) async fn exposure_file(
+        &self,
+        exchange: Exchange,
+        clearing: ClearingCorporation,
+        trading_date: NaiveDate,
+    ) -> Result<Vec<u8>, DataError> {
+        self.one_auxiliary(
+            exchange,
+            clearing,
+            trading_date,
+            "exposure_limit_csv",
+            format!(
+                "no exposure file is archived for {trading_date}, so extreme loss margin is not calculated"
+            ),
+            format!("more than one exposure file hash is archived for {trading_date}"),
+        )
+        .await
+    }
+
+    pub(crate) async fn contract_elm_file(
+        &self,
+        exchange: Exchange,
+        clearing: ClearingCorporation,
+        trading_date: NaiveDate,
+    ) -> Result<Vec<u8>, DataError> {
+        self.one_auxiliary(
+            exchange,
+            clearing,
+            trading_date,
+            "contract_elm_gzip",
+            format!(
+                "no contract ELM file is archived for {trading_date}, so extreme loss margin is not calculated"
+            ),
+            format!("more than one contract ELM file hash is archived for {trading_date}"),
+        )
+        .await
+    }
+
+    pub(crate) async fn contract_master_file(
+        &self,
+        exchange: Exchange,
+        clearing: ClearingCorporation,
+        trading_date: NaiveDate,
+    ) -> Result<Vec<u8>, DataError> {
+        self.one_auxiliary(
+            exchange,
+            clearing,
+            trading_date,
+            "contract_master_gzip",
+            format!("no contract master is archived for {trading_date}"),
+            format!("more than one contract master hash is archived for {trading_date}"),
+        )
+        .await
+    }
+
+    pub(crate) async fn cash_var_file(
+        &self,
+        exchange: Exchange,
+        clearing: ClearingCorporation,
+        trading_date: NaiveDate,
+    ) -> Result<Option<Vec<u8>>, DataError> {
+        let rows = self
+            .auxiliary_rows(
+                exchange,
+                clearing,
+                trading_date,
+                "cash_var_dat",
+                "container_checked",
+            )
+            .await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        one_auxiliary_hash(
+            rows,
+            format!("more than one cash-market VaR file hash is archived for {trading_date}"),
+        )
+        .map(Some)
+    }
+
+    async fn one_auxiliary(
+        &self,
+        exchange: Exchange,
+        clearing: ClearingCorporation,
+        trading_date: NaiveDate,
+        kind: &str,
+        missing: String,
+        duplicate: String,
+    ) -> Result<Vec<u8>, DataError> {
+        let rows = self
+            .auxiliary_rows(exchange, clearing, trading_date, kind, "container_checked")
+            .await?;
+        if rows.is_empty() {
+            return Err(DataError::MarginRejected { detail: missing });
+        }
+        one_auxiliary_hash(rows, duplicate)
+    }
+
+    pub(crate) async fn report_is_archived(
+        &self,
+        exchange: Exchange,
+        clearing: ClearingCorporation,
+        trading_date: NaiveDate,
+        kind: NseReportKind,
+    ) -> Result<bool, DataError> {
+        if let Some(auxiliary_kind) = kind.auxiliary_kind() {
+            return self
+                .auxiliary_is_archived(exchange, clearing, trading_date, auxiliary_kind)
+                .await;
+        }
+        let Some(snapshot) = kind.snapshot() else {
+            return Ok(false);
+        };
+        self.span_snapshot_archived(
+            exchange,
+            clearing,
+            trading_date,
+            SPAN_FILE_FORMAT,
+            &snapshot,
+        )
+        .await
     }
 
     pub(crate) async fn auxiliary_is_archived(

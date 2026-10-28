@@ -218,6 +218,18 @@ async fn openapi_documents_published_routes_and_swagger_ui_loads() {
     )
     .expect("script");
     assert!(script.contains("/api/v1/openapi.json"));
+    assert!(script.contains("\"filter\": true"));
+    assert!(script.contains("\"tryItOutEnabled\": true"));
+
+    let trading_datetime = &body["components"]["schemas"]["MarginRequest"]["properties"]["trading_datetime"]
+        ["description"];
+    assert!(
+        trading_datetime
+            .as_str()
+            .expect("trading_datetime description")
+            .contains("India Standard Time"),
+        "{trading_datetime}"
+    );
 }
 
 async fn post_margin(body: &str) -> (StatusCode, serde_json::Value) {
@@ -261,11 +273,12 @@ async fn margin_requests_are_validated_before_the_archive_is_read() {
     );
 
     let (status, body) = post_margin(
-        r#"{"exchange":"BSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"symbol":"NIFTY26NOVFUT","quantity":"-65"}]}"#,
+        r#"{"exchange":"BSE","trading_datetime":"2026-10-28T16:00:00+05:30","positions":[{"underlying":"SENSEX","expiry":"2026-10-29","right":"FUT","quantity":"-1"}]}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(request_error(&body).contains("NSE"), "{body}");
+    assert_eq!(body["error"]["code"], "margin_rejected");
+    assert!(request_error(&body).contains("archived SPAN"), "{body}");
 
     let (status, body) = post_margin(
         r#"{"exchange":"NSE","trading_datetime":"28-10-2026","positions":[{"symbol":"NIFTY26NOVFUT","quantity":"-65"}]}"#,
@@ -354,6 +367,14 @@ async fn canonical_instrument_is_built_from_the_contract_fields() {
     assert!(body["strike"].is_null());
     assert_eq!(body["right"], "FUT");
     assert!(body.get("total_margin").is_none());
+
+    let (status, body) = post_margin_path(
+        "/api/v1/instruments/canonical",
+        r#"{"exchange":"BSE","underlying":"SENSEX","expiry":"2026-10-29","right":"FUT"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["canonical"], "BSE:SENSEX:2026-10-29:FUT");
 
     let (status, body) = post_margin_path(
         "/api/v1/instruments/canonical",

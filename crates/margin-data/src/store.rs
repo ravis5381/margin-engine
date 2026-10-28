@@ -1,5 +1,5 @@
 use crate::DataError;
-use crate::span_quote::MarginPosition;
+use crate::span::quote::MarginPosition;
 use margin_domain::{
     ClearingCorporation, DatasetId, DatasetOrigin, Exchange, RiskDataset, SnapshotClass,
     ValidationStatus,

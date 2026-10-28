@@ -74,10 +74,15 @@ pub fn router(state: AppState) -> Router {
 }
 
 #[derive(Serialize, ToSchema)]
-#[schema(description = "Liveness payload. It does not report database or calculation readiness.")]
+#[schema(
+    description = "Process liveness. This payload does not report the database or the calculation."
+)]
 struct HealthBody {
+    /// Always `ok` when the process answered.
     status: &'static str,
+    /// API version, the crate version of this build.
     version: &'static str,
+    /// `none` until an official calculation is reconciled.
     equivalence_claim: &'static str,
 }
 
@@ -86,10 +91,10 @@ struct HealthBody {
     path = "/health",
     tag = "operations",
     operation_id = "health",
-    summary = "Liveness",
-    description = "Reports that the process is answering. This check does not query the database and does not claim a margin calculation is available.",
+    summary = "Check process liveness",
+    description = "Returns 200 when the process is answering. The check does not open the database and does not look at archived files. Use `GET /ready` for production readiness.",
     responses(
-        (status = 200, description = "Process is alive", body = HealthBody)
+        (status = 200, description = "The process is answering", body = HealthBody)
     )
 )]
 async fn health() -> Json<HealthBody> {
@@ -101,17 +106,24 @@ async fn health() -> Json<HealthBody> {
 }
 
 #[derive(Serialize, ToSchema)]
-#[schema(description = "Readiness payload. status is ready only when every check passed.")]
+#[schema(description = "Readiness report. `status` is `ready` only when every check passed.")]
 struct ReadinessBody {
+    /// `ready` or `not_ready`.
     status: &'static str,
+    /// `none` until an official calculation is reconciled.
     equivalence_claim: &'static str,
+    /// `database`, `official_validated_dataset`, and `official_calculation`, in that order.
     checks: Vec<ReadinessCheckBody>,
 }
 
 #[derive(Serialize, ToSchema)]
+#[schema(description = "One readiness check.")]
 struct ReadinessCheckBody {
+    /// `database`, `official_validated_dataset`, or `official_calculation`.
     name: &'static str,
+    /// Whether this check passed.
     passed: bool,
+    /// Why the check passed or failed.
     detail: String,
 }
 
@@ -120,8 +132,9 @@ struct ReadinessCheckBody {
     path = "/ready",
     tag = "operations",
     operation_id = "ready",
-    summary = "Readiness",
-    description = "Returns 200 only when the database responds, at least one published official dataset is stored, and an official margin calculation is implemented. This build does not implement that calculation, so the official_calculation check fails.",
+    summary = "Check production readiness",
+    description = "Returns 200 only when the database responds, at least one published official dataset is stored, and an official margin calculation is implemented.\n\n\
+This build keeps `official_calculation` failed, so the route returns 503. A margin quote can still succeed on `POST /api/v1/margin/calculate` while this check is open.",
     responses(
         (status = 200, description = "Every readiness check passed", body = ReadinessBody),
         (status = 503, description = "At least one readiness check failed", body = ReadinessBody)
@@ -186,13 +199,18 @@ This description is the quote method. It is not a reconciliation to NSE Clearing
 
 #[derive(Serialize, ToSchema)]
 #[schema(
-    description = "Official-data status. Synthetic datasets are excluded from the count. margin_calculation describes the quote method."
+    description = "Claim gate and the method used by the margin quote. The count includes published official datasets only."
 )]
 struct DataStatusBody {
+    /// `none` until a quote is reconciled to a clearing-corporation reference.
     equivalence_claim: &'static str,
+    /// Why the equivalence claim has its current value.
     statement: &'static str,
+    /// How `POST /api/v1/margin/calculate` values a book. This text is the quote method, not a reconciliation result.
     margin_calculation: &'static str,
+    /// `false` until the official method is implemented. `/ready` stays unavailable while this is false.
     official_calculation_implemented: bool,
+    /// Published datasets with origin `official` and validation `passed`. A synthetic dataset is excluded.
     official_validated_datasets: u64,
 }
 
@@ -200,9 +218,10 @@ struct DataStatusBody {
     get,
     path = "/api/v1/data/status",
     tag = "operations",
-    operation_id = "data_status",
-    summary = "Official data status",
-    description = "Reports whether an official margin calculation is implemented, how many published official datasets are stored, and how the margin quote is calculated. A synthetic dataset does not increase the count. The quote method is not a reconciliation to NSE Clearing or ICCL.",
+    operation_id = "dataStatus",
+    summary = "Read calculation status",
+    description = "Returns the equivalence claim, whether an official calculation is implemented, how many published official datasets are stored, and the method text used by the margin quote.\n\n\
+A synthetic dataset does not increase the count. `margin_calculation` describes the quote. It is not a reconciliation to NSE Clearing or ICCL.",
     responses(
         (status = 200, description = "Status was read", body = DataStatusBody),
         (status = 503, description = "Dataset status could not be read", body = ErrorBody)
@@ -231,48 +250,86 @@ async fn data_status(State(state): State<AppState>) -> Response {
 
 #[derive(Serialize, ToSchema)]
 #[schema(
-    description = "Dataset metadata page. The list is capped at 500 rows and contains no margin amounts."
+    description = "One page of archived risk-dataset metadata. The page holds at most 500 rows."
 )]
 struct DatasetListBody {
+    /// `none` until an official calculation is reconciled.
     equivalence_claim: &'static str,
+    /// `true` when more than 500 datasets exist and this page stopped at 500.
     truncated: bool,
+    /// Newest trading dates first.
     datasets: Vec<DatasetBody>,
 }
 
 #[derive(Serialize, ToSchema)]
+#[schema(description = "One archived risk dataset.")]
 struct DatasetEnvelope {
+    /// `none` until an official calculation is reconciled.
     equivalence_claim: &'static str,
+    /// Dataset metadata. The file bytes are not included.
     dataset: DatasetBody,
 }
 
 #[derive(Serialize, ToSchema)]
-#[schema(description = "Archived risk-dataset metadata. Source URLs are omitted.")]
+#[schema(
+    description = "Metadata for one archived risk file. Source URLs and file bytes are omitted."
+)]
 struct DatasetBody {
+    /// Dataset UUID. Pass this to `GET /api/v1/risk-data/datasets/{dataset_id}`.
     id: String,
+    /// `NSE` or `BSE`.
     exchange: String,
+    /// `NSCCL` for NSE Clearing, or `ICCL`.
     clearing_corporation: String,
+    /// Business date of the file, `YYYY-MM-DD`.
     trading_date: String,
+    /// `begin_of_day`, `intraday`, or `end_of_day`.
     snapshot_class: String,
+    /// Intraday sequence `1` through `4`. Absent for begin-of-day and end-of-day.
     intraday_sequence: Option<u32>,
+    /// `pending`, `passed`, or `failed`.
     validation_status: String,
+    /// `draft`, `published`, `superseded`, or `rejected`.
     publication_status: String,
+    /// `official` or `synthetic`. A synthetic row is excluded from the official dataset count.
     origin: String,
+    /// SHA-256 of the archived bytes.
     sha256: String,
+    /// File layout, such as `nse-span-xml-4.00-zip`.
     file_format: String,
+    /// Parser that accepted the file, or `none` when the bytes are stored only.
     parser_version: String,
+    /// Filename as published, such as `nsccl.20261028.s.zip`.
     original_filename: String,
+    /// Present when validation failed.
     validation_error_summary: Option<String>,
+    /// Contract-master version linked to a published dataset. Absent on a draft SPAN file.
     contract_master_version_id: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
+#[schema(
+    description = "Failed request.",
+    example = json!({
+        "error": {
+            "code": "invalid_request",
+            "message": "at least one position is required"
+        }
+    })
+)]
 pub(crate) struct ErrorBody {
+    /// Error code and message.
     error: ErrorDetail,
 }
 
 #[derive(Serialize, ToSchema)]
+#[schema(description = "One API error. `code` is stable. `message` explains this occurrence.")]
 struct ErrorDetail {
+    /// `invalid_request`, `span_file_not_found`, `margin_rejected`, `download_failed`, `database_unavailable`, `invalid_dataset_id`, or `not_found`.
+    #[schema(example = "invalid_request")]
     code: &'static str,
+    /// Explanation safe to show to the caller.
+    #[schema(example = "at least one position is required")]
     message: String,
 }
 
@@ -280,9 +337,10 @@ struct ErrorDetail {
     get,
     path = "/api/v1/risk-data/datasets",
     tag = "risk-data",
-    operation_id = "list_datasets",
-    summary = "List risk datasets",
-    description = "Lists archived dataset metadata. At most 500 rows are returned, and truncated is true when more rows exist. The payload does not include margin amounts or source URLs.",
+    operation_id = "listDatasets",
+    summary = "List archived risk datasets",
+    description = "Returns metadata for archived risk files, newest trading date first. The page stops at 500 rows and sets `truncated` when more exist.\n\n\
+The payload has no margin amounts, no file bytes, and no source URLs. Use `id` with `GET /api/v1/risk-data/datasets/{dataset_id}`.",
     responses(
         (status = 200, description = "Dataset metadata page", body = DatasetListBody),
         (status = 503, description = "Dataset list could not be read", body = ErrorBody)
@@ -311,11 +369,11 @@ async fn list_datasets(State(state): State<AppState>) -> Response {
     get,
     path = "/api/v1/risk-data/datasets/{dataset_id}",
     tag = "risk-data",
-    operation_id = "get_dataset",
-    summary = "Get one risk dataset",
-    description = "Returns metadata for one archived dataset. The identifier is the dataset UUID, not a display symbol.",
+    operation_id = "getDataset",
+    summary = "Read one archived risk dataset",
+    description = "Returns metadata for one archived dataset. `dataset_id` is the UUID from the list route, not a symbol or a filename.",
     params(
-        ("dataset_id" = String, Path, description = "UUID of an archived risk dataset")
+        ("dataset_id" = String, Path, description = "Dataset UUID, for example `01a181f5-3bfc-75d7-814c-45ec83f3c8df`.")
     ),
     responses(
         (status = 200, description = "Dataset metadata", body = DatasetEnvelope),

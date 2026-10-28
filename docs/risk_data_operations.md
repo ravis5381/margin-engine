@@ -14,7 +14,7 @@ A disabled source must record a blocker. An enabled source must have an HTTPS
 URL on an approved host, port 443, and no userinfo. Redirects are limited to
 approved HTTPS hosts. The example NSE source points at
 `https://www.nseindia.com/api/reports` and is enabled. The example ICCL source
-stays disabled.
+points at the BSE risk-parameter listing and is enabled.
 
 ## Dataset versions
 
@@ -40,7 +40,7 @@ margin-engine ingest --source NSE --date 2026-10-27 --kind exposure-limit
 margin-engine ingest --source NSE --date 2026-10-27 --kind contract-elm
 margin-engine ingest --source ICCL --date 2026-10-28
 margin-engine validate-dataset --dataset-id <uuid>
-margin-engine reconcile --date 2026-10-28
+margin-engine reconcile --reference reference.json
 margin-engine replay --input portfolio.json --date 2026-10-28
 ```
 
@@ -56,10 +56,19 @@ a draft dataset. Exposure and contract-ELM files become auxiliary rows. The
 command prints the id, filename, and SHA-256, and states that the file is not a
 margin. A repeated SHA-256 reuses the existing row.
 
-A missing `--kind`, an unknown kind, or a bad date exits 2. ICCL ingest exits 3.
+A missing `--kind`, an unknown kind, or a bad date exits 2. ICCL ingest
+downloads the published SPAN snapshots and `ICCL_EDXELMddmmyy.zip`.
 A disabled source, a failed download, a container mismatch, or a database
 failure exits 1. Without `DATABASE_URL`, NSE ingest and `list-datasets` fail
-and `/ready` is not ready. `validate-dataset`, `reconcile`, and `replay` still
-exit 3 after argument checks.
+and `/ready` is not ready. `validate-dataset` and `replay` still exit 3 after
+argument checks.
+
+`reconcile --reference` reads an operator JSON file. The file names the trade
+time, `span_filename` or `span_sha256`, the positions, and the expected
+`span_margin`, `extreme_loss_margin`, `premium`, `delivery_margin`, and
+`total_margin`. The command quotes that book on the SPAN snapshot current at
+the trade time. The quoted file must be the named file. Each component is
+printed with its absolute difference. Any non-zero difference exits 1. A match
+exits 0 and still prints `equivalence_claim=none`. A bad reference exits 2.
 
 Set `MARGIN_ENGINE_SKIP_DOTENV=1` when a local `.env` must not affect a process.

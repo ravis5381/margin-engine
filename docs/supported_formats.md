@@ -68,10 +68,19 @@ A container mismatch is stored as a rejected row and the command fails. The
 original bytes are still the archived body. A non-file response, including an
 HTTP 404 page, is not archived.
 
-ICCL is not supported. `https://www.icclindia.com/riskmgmt/RiskparameterNEW.aspx`
-redirects to `https://www.bseclearing.com/riskmgmt/RiskparameterNEW.aspx`, which
-is an HTML form. No file response was captured, and that host is not
-allowlisted. `ingest --source ICCL` exits 3.
+ICCL SPAN is the XML member of `BSERISKYYYYMMDD-NN.ZIP` from
+`www.bseindia.com/bsedata/Risk_Automate/`. The listing is
+`api.bseindia.com/BseIndiaAPI/api/LoadData/w?date=YYYYMMDD&flag=0`. That
+listing denies a non-browser client, and the download then requests the six
+public paths the listing names. A missing path is skipped. Modes are
+`B` begin of day, `I` `J` `K` `L` the four intraday files, and `Z` the final
+file. The member is XML-based SPAN 4.00 with clearing organization `ICCL` and
+exchange `BSE`. SENSEX is the combined commodity named `BSE 30 SENSEX`; its
+futures portfolio is `BSXFUT`. The extreme-loss file is
+`ICCL_EDXELMddmmyy.zip`, a CSV of token, symbol, instrument, normal percent,
+additional percent, and total percent. A future symbol is `PRODUCTYYMONFUT`.
+`SENSEX26OCTFUT` with instrument `IF` is the October SENSEX future. These
+layouts were observed on 28 October 2026. The positional SPN zip is not parsed.
 
 `www.nseclearing.in` remains an informational site. It is not the download
 host for these files. An unofficial SPAN mirror is not used.

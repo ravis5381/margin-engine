@@ -6,6 +6,7 @@
 //! 1425/2012. NSE Clearing states that a risk-array loss is positive and a gain
 //! is negative. This parser checks that document. It does not calculate margin.
 
+use crate::zip_safe::{ZipLimits, extract_zip_to_memory};
 use chrono::{NaiveDate, NaiveDateTime};
 use flate2::read::DeflateDecoder;
 use quick_xml::Reader;
@@ -14,6 +15,8 @@ use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::str::FromStr;
+
+pub(crate) const PARSER_VERSION: &str = "span-xml-4.00";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SpanXmlReport {
@@ -198,7 +201,7 @@ struct ParseState {
     file_format: Option<String>,
     business_date: Option<NaiveDate>,
     clearing_org: Option<String>,
-    saw_nse: bool,
+    exchange: Option<String>,
     completed: BTreeMap<String, Vec<u32>>,
     open_rate: Option<String>,
     open_points: Vec<u32>,
@@ -295,7 +298,17 @@ fn take_text(state: &mut ParseState, stack: &[Tag], value: &str) -> Result<(), S
                 return Err("SPAN clearing organization is repeated".to_owned());
             }
         }
-        Tag::Exch if grandparent == Some(Tag::Exchange) && value == "NSE" => state.saw_nse = true,
+        Tag::Exch if grandparent == Some(Tag::Exchange) => {
+            if let Some(existing) = &state.exchange {
+                if existing != value {
+                    return Err(format!(
+                        "SPAN exchange `{value}` conflicts with `{existing}`"
+                    ));
+                }
+            } else {
+                state.exchange = Some(value.to_owned());
+            }
+        }
         Tag::Rate if grandparent == Some(Tag::PointDef) => {
             if state.open_rate.is_some() {
                 return Err("SPAN pointDef rate id is repeated".to_owned());
@@ -377,15 +390,15 @@ impl ParseState {
                 "SPAN business date {business_date} does not match the requested trading date {trading_date}"
             ));
         }
-        match self.clearing_org.as_deref() {
-            Some("NSCCL") => {}
-            Some(other) => {
-                return Err(format!("SPAN clearing organization `{other}` is not NSCCL"));
+        match (self.clearing_org.as_deref(), self.exchange.as_deref()) {
+            (Some("NSCCL"), Some("NSE")) | (Some("ICCL"), Some("BSE")) => {}
+            (Some(org), Some(exchange)) => {
+                return Err(format!(
+                    "SPAN clearing organization `{org}` and exchange `{exchange}` are not NSCCL/NSE or ICCL/BSE"
+                ));
             }
-            None => return Err("SPAN clearing organization is missing".to_owned()),
-        }
-        if !self.saw_nse {
-            return Err("SPAN file does not name exchange NSE".to_owned());
+            (None, _) => return Err("SPAN clearing organization is missing".to_owned()),
+            (Some(_), None) => return Err("SPAN file does not name an exchange".to_owned()),
         }
         if self.completed.is_empty() {
             return Err("SPAN file has no scan-point definition".to_owned());
@@ -405,6 +418,31 @@ impl ParseState {
             risk_array_count: self.risk_array_count,
         })
     }
+}
+
+pub(crate) fn check_span_container(
+    bytes: &[u8],
+    expected_member: &str,
+    max_uncompressed_bytes: u64,
+    trading_date: NaiveDate,
+) -> Result<SpanXmlReport, String> {
+    let entries = extract_zip_to_memory(bytes, ZipLimits::conservative(max_uncompressed_bytes))
+        .map_err(|error| error.to_string())?;
+    if entries.len() != 1 || entries[0].name != expected_member {
+        let found = if entries.is_empty() {
+            "no members".to_owned()
+        } else {
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(format!(
+            "SPAN zip member `{found}` did not match the verified name `{expected_member}`"
+        ));
+    }
+    parse_span_xml(&entries[0].bytes, trading_date)
 }
 
 #[cfg(test)]
@@ -454,6 +492,16 @@ mod tests {
             "<fileFormat>3.00</fileFormat>",
         );
         assert!(parse_span_xml(other_format.as_bytes(), trading_date).is_err());
+    }
+
+    #[test]
+    fn span_xml_accepts_an_iccl_bse_file() {
+        let iccl = document()
+            .replace("<ec>NSCCL</ec>", "<ec>ICCL</ec>")
+            .replace("<exch>NSE</exch>", "<exch>BSE</exch>");
+        assert!(parse_span_xml(iccl.as_bytes(), date()).is_ok());
+        let mixed = document().replace("<ec>NSCCL</ec>", "<ec>ICCL</ec>");
+        assert!(parse_span_xml(mixed.as_bytes(), date()).is_err());
     }
 
     #[test]

@@ -26,7 +26,9 @@ returns an error. ELM, delivery margin, premium, crystallised obligations,
 additional margin, and cross-margin benefit do the same.
 
 `margin-reconciliation` compares two amounts. A difference stays material when
-the amounts differ, including when it is inside a diagnostic tolerance.
+the amounts differ, including when it is inside a diagnostic tolerance. The
+`reconcile` command prints that comparison for an operator reference and one
+SPAN snapshot. The category is left unset.
 
 `margin-api` exposes liveness, readiness, data status, and dataset metadata.
 Swagger UI at `/swagger-ui` and the OpenAPI document at `/api/v1/openapi.json`

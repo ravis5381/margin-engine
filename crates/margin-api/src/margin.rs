@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, FixedOffset, NaiveDateTime};
 use margin_data::{
     AppStore, DataError, MarginPosition, canonical_contract_symbol, check_margin_positions,
-    ensure_nse_margin_files,
+    ensure_iccl_margin_files, ensure_nse_margin_files,
 };
 use margin_domain::{ClearingCorporation, Exchange};
 use rust_decimal::Decimal;
@@ -56,9 +56,6 @@ fn prepare_book(
     request: &MarginRequest,
 ) -> Result<(Exchange, NaiveDateTime, Vec<MarginPosition>), String> {
     let exchange = Exchange::parse(request.exchange.trim()).map_err(|error| error.to_string())?;
-    if exchange != Exchange::Nse {
-        return Err("SPAN margin is available for archived NSE files".to_owned());
-    }
     let trading_datetime = parse_trading_datetime(&request.trading_datetime)?;
     if request.positions.is_empty() {
         return Err("at least one position is required".to_owned());
@@ -106,88 +103,148 @@ fn position_symbol(exchange: Exchange, position: &MarginPositionRequest) -> Resu
 
 #[derive(Deserialize, ToSchema)]
 #[schema(
-    description = "One NSE trade datetime and its positions. The datetime selects the latest SPAN file whose created time is at or before that moment. A time without an offset is India Standard Time, the clock in the SPAN file. A position sends either a symbol or underlying, expiry, strike, and right. Sending both is rejected. This does not replicate NSE Clearing or ICCL."
+    description = "One NSE or BSE book valued at a trade time. The example is a short 65-unit NIFTY November future. A BSE book uses underlying SENSEX.",
+    example = json!({
+        "exchange": "NSE",
+        "trading_datetime": "2026-10-28T14:30:00+05:30",
+        "positions": [{
+            "underlying": "NIFTY",
+            "expiry": "2026-11-23",
+            "right": "FUT",
+            "quantity": "-65"
+        }]
+    })
 )]
 pub struct MarginRequest {
+    /// `NSE` or `BSE`. `BSE` quotes SENSEX from the ICCL SPAN file.
     #[schema(example = "NSE")]
     exchange: String,
+    /// Trade time. No offset means India Standard Time. `2026-10-28T14:30:00+05:30` and `2026-10-28T14:30:00` are the same moment.
     #[schema(example = "2026-10-28T14:30:00+05:30")]
     trading_datetime: String,
+    /// One to 32 positions. Symbols are matched case-insensitively and must be unique.
     positions: Vec<MarginPositionRequest>,
 }
 
 #[derive(Deserialize, ToSchema)]
 #[schema(
-    description = "Either symbol, or underlying with right. Right is FUT, C, P, CE, PE, or EQ. A future needs expiry and no strike. An option needs expiry and a positive strike. Quantity is a non-zero decimal string."
+    description = "One position. Send `symbol`, or send `underlying` with `right` and the fields that right requires. Sending both is rejected."
 )]
 pub struct MarginPositionRequest {
+    /// Market symbol or canonical symbol, such as `NIFTY26NOVFUT` or `NSE:NIFTY:2026-11-23:FUT`. Omit when the contract fields are set.
     #[schema(example = "NSE:NIFTY:2026-11-23:FUT")]
     #[serde(default)]
     symbol: Option<String>,
+    /// Product code, such as `NIFTY`, `RELIANCE`, or `SENSEX`.
     #[schema(example = "NIFTY")]
     #[serde(default)]
     underlying: Option<String>,
+    /// Contract expiry as `YYYY-MM-DD`. Required for a future or an option. Omit for `EQ`.
     #[schema(example = "2026-11-23")]
     #[serde(default)]
     expiry: Option<String>,
+    /// Option strike in rupees, such as `26000`. Required and positive for an option. Omit for a future and for `EQ`.
     #[schema(example = "26000")]
     #[serde(default)]
     strike: Option<String>,
+    /// `FUT`, `C`, `P`, `CE`, `PE`, or `EQ`. `C` and `P` are stored as `CE` and `PE`.
     #[schema(example = "FUT")]
     #[serde(default)]
     right: Option<String>,
+    /// Signed quantity in units. `-65` is short 65 units. Zero is rejected.
     #[schema(example = "-65")]
     quantity: String,
 }
 
 #[derive(Serialize, ToSchema)]
 #[schema(
-    description = "SPAN scanning risk, spread charge, extreme loss margin, option premium, delivery margin, and the combined total. Amounts are decimal strings in INR, rounded half away from zero to paise. The total is SPAN margin plus exposure margin plus delivery margin. A short option's premium is included. A book of only long options has a total equal to its delivery margin. Margin benefit is the reduction already reflected in a spread total, measured before delivery margin."
+    description = "Margin quote in INR. `total_margin` is SPAN margin plus extreme loss margin plus delivery margin. A short option premium is included in that total. Payable premium is reported separately."
 )]
 pub struct MarginResponse {
+    /// `none` until this quote is reconciled to NSE Clearing or ICCL for the same book and file.
     equivalence_claim: &'static str,
+    /// Parser identity. `nse-span-xml-4.00` for the current quote.
     method: &'static str,
+    /// Always `INR`.
     currency: &'static str,
+    /// Business date of the selected SPAN file, `YYYY-MM-DD`.
     trading_date: String,
+    /// Requested trade time, normalized to India Standard Time.
     trading_datetime: String,
+    /// `<created>` time of the SPAN file used for this quote, in India Standard Time.
     span_created: String,
+    /// UUID of the archived SPAN dataset.
     dataset_id: String,
+    /// `begin_of_day`, `intraday`, or `end_of_day`.
     snapshot_class: String,
+    /// Intraday sequence `1` through `4`. Absent for begin-of-day and end-of-day.
     intraday_sequence: Option<u32>,
+    /// Archived SPAN filename, such as `nsccl.20261028.i4.zip`.
     filename: String,
+    /// SHA-256 of the archived SPAN zip.
     sha256: String,
+    /// Greatest scenario loss across the book. Zero when every scenario is a gain.
     scanning_risk: String,
+    /// Calendar-spread charge from the SPAN file, added to scanning risk.
     spread_charge: String,
+    /// Short-option minimum. Zero when the SPAN file publishes a single zero rate.
     short_option_minimum: String,
+    /// `scanning_risk` + `spread_charge` + `short_option_minimum`.
     span_margin: String,
+    /// Extreme loss margin from the contract-wise ELM file.
     extreme_loss_margin: String,
+    /// Signed option premium, `quantity * SPAN option price`. A short option is negative.
     premium: String,
+    /// Payable premium, `max(0, premium)`. Reported beside the total and not added again.
     premium_margin: String,
+    /// Delivery margin on stock derivatives inside the expiry window. Zero for an index and outside that window.
     delivery_margin: String,
+    /// Always `0.00`. Index-constituent cross margin is not applied.
     cross_margin_benefit: String,
+    /// Reduction already present in a spread, measured on position totals before delivery margin.
     margin_benefit: String,
+    /// SPAN margin plus extreme loss margin plus delivery margin. A short option premium is included.
     total_margin: String,
+    /// One line per accepted position, in request order.
     positions: Vec<MarginLineBody>,
+    /// Which charges this book used.
     note: &'static str,
 }
 
 #[derive(Serialize, ToSchema)]
+#[schema(description = "One position after it has been matched to a SPAN contract.")]
 pub struct MarginLineBody {
+    /// Symbol as submitted, or the canonical symbol built from the contract fields.
     symbol: String,
+    /// `NSE:PRODUCT:YYYY-MM-DD:FUT`, `NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE|PE`, or `NSE:PRODUCT:EQ`.
     canonical: String,
+    /// `future`, `call`, `put`, or `stock`.
     instrument: String,
+    /// SPAN product code.
     product: String,
+    /// Contract expiry. Absent for a physical stock.
     expiry: Option<String>,
+    /// Option strike in rupees. Absent for a future and for a stock.
     strike: Option<String>,
+    /// Signed quantity in units.
     quantity: String,
+    /// SPAN settlement price for this contract.
     settlement_price: String,
+    /// SPAN underlying price. Present for an option.
     underlying_price: Option<String>,
+    /// Greatest scenario loss for this line.
     scanning_risk: String,
+    /// Extreme loss margin for this line.
     extreme_loss_margin: String,
+    /// Contract ELM percent applied to this line. A spread can charge a smaller percent on the matched far month.
     elm_percent: String,
+    /// Signed premium for this option. Zero for a future or a stock.
     premium: String,
+    /// Line total before portfolio netting. The book total can be lower when a spread applies.
     total_margin: String,
+    /// Lot size from the NSE F&O contract master. Absent for a physical stock. Not applied to quantity.
     lot_size: Option<u32>,
+    /// SPAN scan-point numbers that produced the greatest loss.
     worst_scan_points: Vec<u32>,
 }
 
@@ -195,14 +252,31 @@ pub struct MarginLineBody {
     post,
     path = "/api/v1/margin/calculate",
     tag = "margin",
-    operation_id = "calculate_margin",
-    summary = "SPAN, extreme loss margin, and premium",
-    description = "Builds a canonical symbol from underlying, expiry, strike, and right, or accepts a symbol. The trade datetime selects the latest archived NSE SPAN file whose created time is at or before that moment, and the exposure, contract ELM, cash VaR, and contract master files for that date. An invalid book is rejected before those files are read. The total is SPAN margin plus exposure margin plus delivery margin. A short option premium is included. This does not replicate NSE Clearing or ICCL.",
-    request_body = MarginRequest,
+    operation_id = "calculateMargin",
+    summary = "Quote margin for a book",
+    description = "Values one NSE or BSE book on the latest archived SPAN snapshot whose created time is at or before `trading_datetime`.\n\n\
+Exposure, contract ELM, cash-market VaR, and the F&O contract master are the NSE files for that calendar date. A BSE SENSEX book uses the ICCL SPAN file and the ICCL extreme-loss percent for that future month. SENSEX is the combined commodity named BSE 30 SENSEX. If a required file is missing, it is downloaded and the quote is retried once. A time before the first snapshot of the day returns 404.\n\n\
+**Total** = SPAN margin + extreme loss margin + delivery margin. SPAN margin is the greatest scenario loss, plus the calendar-spread charge, plus a short-option minimum of zero when the file rate is zero. A futures spread charges one third of the far-month ELM percent on the matched quantity. A short option premium is included in the total. A book of only long options totals its delivery margin.\n\n\
+An empty book, a zero quantity, a repeated symbol, a non-positive option strike, and a position that sends both a symbol and contract fields are rejected before the archive is read. This quote does not replicate NSE Clearing or ICCL.",
+    request_body(
+        content = MarginRequest,
+        description = "Exchange, trade time, and one to 32 positions.",
+        example = json!({
+            "exchange": "NSE",
+            "trading_datetime": "2026-10-28T14:30:00+05:30",
+            "positions": [{
+                "underlying": "NIFTY",
+                "expiry": "2026-11-23",
+                "right": "FUT",
+                "quantity": "-65"
+            }]
+        })
+    ),
     responses(
-        (status = 200, description = "SPAN scanning requirement", body = MarginResponse),
-        (status = 404, description = "No SPAN file published at or before that datetime is archived", body = crate::ErrorBody),
-        (status = 422, description = "The book or the as-of SPAN file cannot be valued, or a required file could not be downloaded", body = crate::ErrorBody),
+        (status = 200, description = "Margin quote for the SPAN file current at the trade time", body = MarginResponse),
+        (status = 404, description = "No SPAN file was published at or before the trade time", body = crate::ErrorBody),
+        (status = 408, description = "The quote exceeded the configured request timeout"),
+        (status = 422, description = "The book is invalid, the SPAN file cannot value it, or a required file could not be downloaded", body = crate::ErrorBody),
         (status = 503, description = "The archive could not be read", body = crate::ErrorBody)
     )
 )]
@@ -216,31 +290,31 @@ pub async fn calculate_margin(
             return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", detail);
         }
     };
+    let clearing = match exchange {
+        Exchange::Nse => ClearingCorporation::Nscc,
+        Exchange::Bse => ClearingCorporation::Iccl,
+    };
     let stored = match state
         .store
-        .span_margin(
-            exchange,
-            ClearingCorporation::Nscc,
-            trading_datetime,
-            &positions,
-        )
+        .span_margin(exchange, clearing, trading_datetime, &positions)
         .await
     {
         Err(error) if missing_archive(&error) => {
             if let (Some(config), AppStore::Postgres(store)) = (&state.config, &state.store)
-                && let Err(error) =
-                    ensure_nse_margin_files(config, store, trading_datetime.date()).await
+                && let Err(error) = match exchange {
+                    Exchange::Nse => {
+                        ensure_nse_margin_files(config, store, trading_datetime.date()).await
+                    }
+                    Exchange::Bse => {
+                        ensure_iccl_margin_files(config, store, trading_datetime.date()).await
+                    }
+                }
             {
                 return download_error(error);
             }
             state
                 .store
-                .span_margin(
-                    exchange,
-                    ClearingCorporation::Nscc,
-                    trading_datetime,
-                    &positions,
-                )
+                .span_margin(exchange, clearing, trading_datetime, &positions)
                 .await
         }
         other => other,
@@ -252,7 +326,10 @@ pub async fn calculate_margin(
                 StatusCode::OK,
                 Json(MarginResponse {
                     equivalence_claim: margin_domain::EQUIVALENCE_CLAIM,
-                    method: "nse-span-xml-4.00",
+                    method: match exchange {
+                        Exchange::Nse => "nse-span-xml-4.00",
+                        Exchange::Bse => "iccl-span-xml-4.00",
+                    },
                     currency: quote.currency,
                     trading_date: stored.trading_date.to_string(),
                     trading_datetime: ist_stamp(stored.trading_datetime),
@@ -320,6 +397,7 @@ fn missing_archive(error: &DataError) -> bool {
         DataError::MarginRejected { detail } => {
             detail.contains("no exposure file is archived")
                 || detail.contains("no contract ELM file is archived")
+                || detail.contains("no ICCL extreme loss file is archived")
                 || detail.contains("capital-market VaR rate is not in the archived files")
                 || detail.contains("no contract master is archived")
         }
@@ -329,33 +407,57 @@ fn missing_archive(error: &DataError) -> bool {
 
 #[derive(Deserialize, ToSchema)]
 #[schema(
-    description = "Exchange, underlying, expiry, strike, and right. Right is FUT, C, P, CE, PE, or EQ. A future has no strike. An option needs a positive strike. EQ is a physical stock."
+    description = "Contract identity. A future has an expiry and no strike. An option has an expiry and a positive strike. `EQ` is a physical stock and has neither.",
+    example = json!({
+        "exchange": "NSE",
+        "underlying": "NIFTY",
+        "expiry": "2026-11-23",
+        "right": "FUT"
+    })
 )]
 pub struct CanonicalInstrumentRequest {
+    /// `NSE` or `BSE`.
     #[schema(example = "NSE")]
     exchange: String,
+    /// Product code, such as `NIFTY`, `RELIANCE`, or `SENSEX`.
     #[schema(example = "NIFTY")]
     underlying: String,
+    /// `YYYY-MM-DD`. Required for `FUT`, `C`, `P`, `CE`, and `PE`.
     #[schema(example = "2026-11-23")]
     #[serde(default)]
     expiry: Option<String>,
+    /// Strike in rupees. Required for an option.
     #[schema(example = "26000")]
     #[serde(default)]
     strike: Option<String>,
+    /// `FUT`, `C`, `P`, `CE`, `PE`, or `EQ`.
     #[schema(example = "FUT")]
     right: String,
 }
 
 #[derive(Serialize, ToSchema)]
 #[schema(
-    description = "Canonical instrument. A future is NSE:UNDERLYING:YYYY-MM-DD:FUT. An option is NSE:UNDERLYING:YYYY-MM-DD:STRIKE:CE or PE. A stock is NSE:UNDERLYING:EQ."
+    description = "Canonical symbol and the fields used to build it. `C` and `P` are returned as `CE` and `PE`.",
+    example = json!({
+        "canonical": "NSE:NIFTY:2026-11-23:FUT",
+        "exchange": "NSE",
+        "underlying": "NIFTY",
+        "expiry": "2026-11-23",
+        "right": "FUT"
+    })
 )]
 pub struct CanonicalInstrumentResponse {
+    /// `NSE:NIFTY:2026-11-23:FUT`, `NSE:NIFTY:2026-11-03:26000:CE`, or `NSE:RELIANCE:EQ`.
     canonical: String,
+    /// Exchange code from the symbol.
     exchange: String,
+    /// Product code from the symbol.
     underlying: String,
+    /// Expiry. Absent for `EQ`.
     expiry: Option<String>,
+    /// Strike in rupees. Present for an option.
     strike: Option<String>,
+    /// `FUT`, `CE`, `PE`, or `EQ`.
     right: String,
 }
 
@@ -363,9 +465,16 @@ pub struct CanonicalInstrumentResponse {
     post,
     path = "/api/v1/instruments/canonical",
     tag = "instruments",
-    operation_id = "canonical_instrument",
-    summary = "Canonical instrument symbol",
-    description = "Builds NSE:UNDERLYING:YYYY-MM-DD:FUT, NSE:UNDERLYING:YYYY-MM-DD:STRIKE:CE, NSE:UNDERLYING:YYYY-MM-DD:STRIKE:PE, or NSE:UNDERLYING:EQ from the exchange, underlying, expiry, strike, and right. It does not read an archived file and does not return a margin.",
+    operation_id = "canonicalInstrument",
+    summary = "Build a canonical symbol",
+    description = "Builds the symbol the margin route matches to SPAN.\n\n\
+| Right | Symbol |\n\
+| --- | --- |\n\
+| `FUT` | `NSE:UNDERLYING:YYYY-MM-DD:FUT` |\n\
+| `C` or `CE` | `NSE:UNDERLYING:YYYY-MM-DD:STRIKE:CE` |\n\
+| `P` or `PE` | `NSE:UNDERLYING:YYYY-MM-DD:STRIKE:PE` |\n\
+| `EQ` | `NSE:UNDERLYING:EQ` |\n\n\
+The route does not read an archived file and does not return a margin. Use the returned `canonical` as `symbol` on `POST /api/v1/margin/calculate`.",
     request_body = CanonicalInstrumentRequest,
     responses(
         (status = 200, description = "Canonical instrument", body = CanonicalInstrumentResponse),

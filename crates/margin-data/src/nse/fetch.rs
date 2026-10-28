@@ -1,9 +1,10 @@
-use crate::nse_reports::{
+use crate::download::read_response_body;
+use crate::nse::reports::{
     NSE_HOST, NSE_REFERER, NSE_REPORTS_PATH, NSE_SESSION_REFERER, NSE_SESSION_URL, NSE_USER_AGENT,
     NSE_VAR_HOST, NseReportKind, cash_var_url, content_disposition_filename, contract_master_url,
     media_type_matches, reports_url,
 };
-use crate::{DataError, DownloadPolicy, enforce_size_limit};
+use crate::{DataError, DownloadPolicy};
 use chrono::NaiveDate;
 use reqwest::header::{ACCEPT, CONTENT_DISPOSITION, CONTENT_TYPE, REFERER, USER_AGENT};
 use reqwest::{StatusCode, Url};
@@ -52,8 +53,12 @@ pub(crate) async fn download_nse_report(
             detail: "NSE session response left the approved NSE host".to_owned(),
         });
     }
-    let _session_body =
-        read_limited(session_response, SESSION_BODY_LIMIT.min(policy.max_bytes())).await?;
+    let _session_body = read_response_body(
+        session_response,
+        SESSION_BODY_LIMIT.min(policy.max_bytes()),
+        "NSE",
+    )
+    .await?;
 
     let response = client
         .get(reports)
@@ -103,7 +108,7 @@ pub(crate) async fn download_nse_report(
             detail: format!("NSE report filename `{filename}` did not match `{expected}`"),
         });
     }
-    let bytes = read_limited(response, policy.max_bytes()).await?;
+    let bytes = read_response_body(response, policy.max_bytes(), "NSE").await?;
     Ok(DownloadedReport {
         filename,
         bytes,
@@ -153,7 +158,7 @@ pub(crate) async fn download_contract_master(
             detail: "contract master response left the approved NSE archive host".to_owned(),
         });
     }
-    let bytes = read_limited(response, policy.max_bytes()).await?;
+    let bytes = read_response_body(response, policy.max_bytes(), "NSE").await?;
     Ok(DownloadedReport {
         filename,
         bytes,
@@ -204,7 +209,7 @@ pub(crate) async fn download_cash_var(
             detail: "cash-market VaR response left the NSE archive host".to_owned(),
         });
     }
-    let bytes = read_limited(response, policy.max_bytes()).await?;
+    let bytes = read_response_body(response, policy.max_bytes(), "NSE").await?;
     Ok(DownloadedReport {
         filename,
         bytes,
@@ -228,35 +233,4 @@ fn header_text(
         .map_err(|_| DataError::DownloadRejected {
             detail: format!("NSE {name} header is not valid text"),
         })
-}
-
-async fn read_limited(
-    mut response: reqwest::Response,
-    max_bytes: u64,
-) -> Result<Vec<u8>, DataError> {
-    if let Some(length) = response.content_length() {
-        enforce_size_limit(length, max_bytes)?;
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| DataError::DownloadRejected {
-            detail: format!("NSE response body could not be read: {error}"),
-        })?
-    {
-        let next = u64::try_from(body.len().saturating_add(chunk.len())).unwrap_or(u64::MAX);
-        if next > max_bytes {
-            return Err(DataError::ArchiveRejected {
-                detail: format!("payload exceeds the configured limit of {max_bytes} bytes"),
-            });
-        }
-        body.extend_from_slice(&chunk);
-    }
-    if body.is_empty() {
-        return Err(DataError::DownloadRejected {
-            detail: "NSE response body is empty".to_owned(),
-        });
-    }
-    Ok(body)
 }

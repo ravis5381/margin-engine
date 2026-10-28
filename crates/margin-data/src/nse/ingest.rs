@@ -1,14 +1,15 @@
 use crate::ContractMaster;
 use crate::archive::{
-    AuxiliaryArchiveRequest, IngestReceipt, SpanArchiveRequest, archive_auxiliary, archive_span,
-    record_download_failure,
+    AuxiliaryArchiveRequest, IngestReceipt, SPAN_SIGN, SpanArchiveRequest, archive_auxiliary,
+    archive_span, record_download_failure,
 };
-use crate::fetch::{download_cash_var, download_contract_master, download_nse_report};
-use crate::nse_reports::{
+use crate::download::file_not_published;
+use crate::nse::fetch::{download_cash_var, download_contract_master, download_nse_report};
+use crate::nse::reports::{
     NSE_SOURCE_ID, NseReportKind, SPAN_FILE_FORMAT, check_contract_elm_gzip, check_exposure_csv,
     check_span_container, is_verified_reports_endpoint,
 };
-use crate::span_quote::CashMarginRates;
+use crate::span::quote::CashMarginRates;
 use crate::{
     AppConfig, ConfiguredSource, DataError, PgStore, build_download_client, ensure_source_fetchable,
 };
@@ -136,10 +137,6 @@ pub async fn ensure_nse_margin_files(
         return Err(error);
     }
     Ok(())
-}
-
-fn file_not_published(error: &DataError) -> bool {
-    matches!(error, DataError::DownloadRejected { detail } if detail.contains("no official file was published"))
 }
 
 async fn archive_cash_var(
@@ -278,6 +275,7 @@ async fn ingest_with_client(
                 rejection,
                 scan_points,
                 risk_array_count,
+                sign_convention: SPAN_SIGN.to_owned(),
             },
         )
         .await;

@@ -33,7 +33,8 @@ The binary is `margin-engine`.
 
 Copy `.env.example` to `.env` and `config/*.example.toml` to `config/app.toml` and
 `config/data_sources.toml` before using a real database. The sample NSE reports
-source is enabled. The sample ICCL source stays disabled. `DATABASE_URL` is
+source is enabled. The sample ICCL source is enabled for the observed BSE SPAN
+and extreme-loss files. `DATABASE_URL` is
 read only from the environment.
 
 ```text
@@ -44,8 +45,11 @@ cargo run -- ingest --source NSE --date 2026-10-27 --kind span-end-of-day
 ```
 
 NSE `ingest` downloads one verified report and stores the original bytes. It
-does not calculate a margin. ICCL `ingest`, `validate-dataset`, `reconcile`,
-and `replay` validate their arguments and then exit 3.
+does not calculate a margin. ICCL `ingest` archives that day's SPAN snapshots
+and the extreme-loss file. `validate-dataset` and `replay` validate their
+arguments and then exit 3. `reconcile --reference` compares an
+operator reference with the quote for the named SPAN file. A match leaves the
+equivalence claim at none.
 
 `GET /health` is a liveness check. `GET /ready` stays unavailable until a
 published official dataset exists and an official calculation is implemented.

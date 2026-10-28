@@ -16,6 +16,9 @@ host = "www.icclindia.com"
 [[approved_hosts]]
 host = "www.bseindia.com"
 
+[[approved_hosts]]
+host = "api.bseindia.com"
+
 [[sources]]
 id = "nse-clearing-equity-derivatives"
 enabled = true
@@ -27,8 +30,10 @@ url = "https://www.nseindia.com/api/reports"
 
 [[sources]]
 id = "iccl-equity-derivatives-risk-parameters"
-enabled = false
+enabled = true
 exchange = "BSE"
 clearing_corporation = "ICCL"
-url = "https://www.icclindia.com/riskmgmt/RiskparameterNEW.aspx"
-blocker = "The ICCL page redirects to https://www.bseclearing.com/riskmgmt/RiskparameterNEW.aspx, an HTML form. No file response was captured, so the ICCL adapter stays disabled."
+url = "https://api.bseindia.com/BseIndiaAPI/api/LoadData/w"
+# The listing and the rewritten www.bseindia.com/bsedata SPAN zip were observed
+# on 28 October 2026, along with ICCL_EDXELMddmmyy.zip. Enabling the source
+# archives those bytes. It does not claim an ICCL margin.

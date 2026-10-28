@@ -163,6 +163,9 @@ pub fn build_download_client(policy: &DownloadPolicy) -> Result<reqwest::Client,
     reqwest::Client::builder()
         .timeout(policy.timeout)
         .cookie_store(true)
+        // BSE's extreme-loss response folds a header with a leading space.
+        // Hyper rejects that line. The file body is unchanged.
+        .http1_ignore_invalid_headers_in_responses(true)
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= max_redirects {
                 return attempt.error(DataError::DownloadRejected {
@@ -213,6 +216,55 @@ fn authorize_url(url: &Url, approved_hosts: &BTreeSet<String>) -> Result<(), Dat
         });
     }
     Ok(())
+}
+
+pub(crate) fn media_type_matches(header: &str, allowed: &[&str]) -> bool {
+    let media = header
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    allowed.iter().any(|expected| media == *expected)
+}
+
+pub(crate) fn file_not_published(error: &DataError) -> bool {
+    matches!(
+        error,
+        DataError::DownloadRejected { detail } if detail.contains("no official file was published")
+    )
+}
+
+pub(crate) async fn read_response_body(
+    mut response: reqwest::Response,
+    max_bytes: u64,
+    source: &str,
+) -> Result<Vec<u8>, DataError> {
+    if let Some(length) = response.content_length() {
+        crate::hash::enforce_size_limit(length, max_bytes)?;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| DataError::DownloadRejected {
+            detail: format!("{source} response body could not be read: {error}"),
+        })?
+    {
+        let next = u64::try_from(body.len().saturating_add(chunk.len())).unwrap_or(u64::MAX);
+        if next > max_bytes {
+            return Err(DataError::ArchiveRejected {
+                detail: format!("payload exceeds the configured limit of {max_bytes} bytes"),
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if body.is_empty() {
+        return Err(DataError::DownloadRejected {
+            detail: format!("{source} response body is empty"),
+        });
+    }
+    Ok(body)
 }
 
 fn normalize_host(host: &str) -> Result<String, DataError> {

@@ -18,6 +18,9 @@ This build does not replicate NSE Clearing or ICCL.
   contract master stay the files for that calendar date. The response is SPAN scanning risk, the calendar-spread
   charge, extreme loss margin, option premium, delivery margin, and a
   cross-margin benefit of zero for NSE futures, options, and physical stocks.
+  A BSE SENSEX future uses the ICCL SPAN file and the extreme-loss percent from
+  `ICCL_EDXELMddmmyy.zip`. BSE options are rejected. Lot size is omitted when
+  no BSE contract master is archived. Quantity stays in units.
   A book may contain more than one expiry. An index contract expiring on the
   trade date is not offset. Far-month futures in a spread are charged one third
   of the contract file's percent. Delivery margin on a stock derivative inside
@@ -39,12 +42,14 @@ This build does not replicate NSE Clearing or ICCL.
 - Example NSE/NSCCL and BSE/ICCL rows are operator configuration. They are not
   a finding that every position uses that arrangement, and they do not permit
   cross-exchange offsets.
-- `www.nseindia.com` is the verified download host for the reports listed in
-  `supported_formats.md`. ICCL's form host was not added, because no file was
-  downloaded from it.
-- Validation, reconciliation, and replay commands are not operational. NSE
-  ingest archives bytes and does not calculate a margin. ICCL ingest is not
-  operational.
+- `www.nseindia.com` is the verified download host for the NSE reports listed in
+  `supported_formats.md`. ICCL SPAN XML and the daily extreme-loss file are
+  downloaded from `api.bseindia.com` and `www.bseindia.com`.
+- `reconcile --reference` compares an operator reference with the quote for
+  the named SPAN file. A non-zero component difference is material. A match
+  leaves the equivalence claim at none. Validation and replay commands are not
+  operational. NSE ingest archives bytes and does not calculate a margin.
+  ICCL ingest archives the day's SPAN snapshots and the extreme-loss file.
 - Ingest, contract, and reconciliation routes are absent. The margin route is
   published.
 - Authentication is not implemented because those mutating routes are absent.
@@ -54,6 +59,4 @@ This build does not replicate NSE Clearing or ICCL.
 A non-zero short-option minimum is rejected when the SPAN file publishes one.
 The archived files so far publish a zero rate. A clearing-corporation margin
 reference is still required before this quote is an official calculation.
-An ICCL file response is still required before that
-adapter can be enabled. A draft dataset is not published as the official
-calculation.
+A draft dataset is not published as the official calculation.

@@ -21,6 +21,7 @@ const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
 const UNCOMPRESSED_LIMIT: u64 = 104_857_600;
+const NOTE_BSE: &str = "SPAN scanning risk from the archived ICCL XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. SENSEX is the combined commodity named BSE 30 SENSEX. Extreme loss margin uses the total percent in the archived ICCL extreme-loss file for that future month. Delivery margin is zero for an index. The total is SPAN margin plus that extreme loss margin. Reported amounts are rounded half away from zero to paise. This quote does not replicate ICCL.";
 const NOTE: &str = "SPAN scanning risk from the archived XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. Calendar spreads add the flat charge from the SPAN file and, for futures, extreme loss margin on one third of the far-month quantity. An index spread that includes a contract expiring on the trade date is not offset. Reported amounts are rounded half away from zero to paise. Delivery margin on a stock derivative is 10, 25, 45, or 70 percent of the archived cash-market daily margin rate from four trading days before expiry through the day before expiry, and the full rate on the expiry day. The quantity is the net shares that expiry would deliver. It is zero outside that window and for an index. The total is SPAN margin plus exposure margin plus delivery margin. Margin benefit compares the separate position totals with the total before delivery margin. Cross-margin benefit is zero.";
 const NOTE_SHORT_OPTION: &str = "SPAN scanning risk from the archived XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. The short-option minimum rate in the SPAN file is zero. A short option's extreme loss margin uses the contract file's percent when that file is loaded, and otherwise the published index or exposure-file percent. Notional is the SPAN underlying price. Delivery margin on a stock derivative is 10, 25, 45, or 70 percent of the archived cash-market daily margin rate from four trading days before expiry through the day before expiry, and the full rate on the expiry day. The quantity is the net shares that expiry would deliver. The total is SPAN margin plus exposure margin plus delivery margin, and the short option premium is included in that total. A book of only long options has a total equal to its delivery margin. Margin benefit compares the separate position totals with the total before delivery margin. Cross-margin benefit is zero.";
 
@@ -111,8 +112,12 @@ pub fn quote_span_zip(
 ) -> Result<SpanMarginQuote, String> {
     let entries = extract_zip_to_memory(bytes, ZipLimits::conservative(UNCOMPRESSED_LIMIT))
         .map_err(|error| error.to_string())?;
-    if entries.len() != 1 || !entries[0].name.ends_with(".spn") {
-        return Err("archived SPAN zip does not contain one .spn member".to_owned());
+    let member = entries.first().map(|entry| entry.name.to_ascii_lowercase());
+    let span_member = member
+        .as_deref()
+        .is_some_and(|name| name.ends_with(".spn") || name.ends_with(".xml"));
+    if entries.len() != 1 || !span_member {
+        return Err("archived SPAN zip does not contain one .spn or .xml member".to_owned());
     }
     quote_span_xml(
         &entries[0].bytes,
@@ -158,8 +163,8 @@ pub fn canonical_contract_symbol(
     strike_text: Option<&str>,
     right: &str,
 ) -> Result<String, String> {
-    if exchange_code != "NSE" {
-        return Err("SPAN margin symbols use the NSE exchange".to_owned());
+    if exchange_code != "NSE" && exchange_code != "BSE" {
+        return Err("SPAN margin symbols use the NSE or BSE exchange".to_owned());
     }
     let product = underlying.trim().to_ascii_uppercase();
     if !ascii_product(&product) {
@@ -172,7 +177,7 @@ pub fn canonical_contract_symbol(
                 return Err("a future has no strike".to_owned());
             }
             let expiry = require_expiry(expiry)?;
-            Ok(format!("NSE:{product}:{expiry}:FUT"))
+            Ok(format!("{exchange_code}:{product}:{expiry}:FUT"))
         }
         "EQ" => {
             if expiry.is_some_and(|expiry| !expiry.trim().is_empty())
@@ -180,7 +185,7 @@ pub fn canonical_contract_symbol(
             {
                 return Err("a physical stock has no expiry or strike".to_owned());
             }
-            Ok(format!("NSE:{product}:EQ"))
+            Ok(format!("{exchange_code}:{product}:EQ"))
         }
         "C" | "CE" | "P" | "PE" => {
             let expiry = require_expiry(expiry)?;
@@ -195,7 +200,7 @@ pub fn canonical_contract_symbol(
             }
             let side = if right.starts_with('C') { "CE" } else { "PE" };
             Ok(format!(
-                "NSE:{product}:{expiry}:{}:{side}",
+                "{exchange_code}:{product}:{expiry}:{}:{side}",
                 strike.normalize()
             ))
         }
@@ -307,7 +312,13 @@ fn price_book(
             .iter()
             .filter_map(|position| position.contract.expiry)
             .collect();
-        let index = !exposure.contains_stock(product);
+        let index = if book.indexes.contains(product) {
+            true
+        } else if book.exchange == "BSE" {
+            false
+        } else {
+            !exposure.contains_stock(product)
+        };
         let separate_expiring = index && derivative_expiries.contains(&trading_date);
         let width = group[0].contract.values.len();
         if width == 0
@@ -320,6 +331,12 @@ fn price_book(
             ));
         }
         for position in &group {
+            if book.exchange == "BSE" && position.contract.kind.is_option() {
+                return Err(format!(
+                    "{} is a BSE option, and the ICCL extreme loss file is applied to futures",
+                    position.symbol
+                ));
+            }
             if position.contract.kind.is_option() && position.quantity.is_sign_negative() {
                 short_option = true;
                 if !commodity.som_is_zero {
@@ -439,7 +456,7 @@ fn price_book(
             };
             lines.push(MarginLine {
                 symbol: position.symbol.clone(),
-                canonical: canonical_symbol(position.contract),
+                canonical: canonical_symbol(&book.exchange, position.contract),
                 instrument: position.contract.kind.label(),
                 product: product.to_owned(),
                 expiry: position.contract.expiry,
@@ -554,7 +571,9 @@ fn price_book(
         margin_benefit,
         total_margin,
         lines: ordered,
-        note: if short_option {
+        note: if book.exchange == "BSE" {
+            NOTE_BSE
+        } else if short_option {
             NOTE_SHORT_OPTION
         } else {
             NOTE
@@ -587,10 +606,12 @@ struct Commodity {
 }
 
 struct Book {
+    exchange: String,
     contracts: Vec<SpanContract>,
     commodities: BTreeMap<String, Commodity>,
     underlyings: BTreeMap<String, Decimal>,
     spreads: BTreeMap<String, Vec<CalendarSpread>>,
+    indexes: BTreeSet<String>,
 }
 
 struct CalendarSpread {
@@ -707,7 +728,7 @@ fn parse_future(symbol: &str, body: &str) -> Result<SymbolSpec, String> {
 
 fn parse_canonical(symbol: &str) -> Result<SymbolSpec, String> {
     let parts: Vec<&str> = symbol.split(':').collect();
-    if parts.first() == Some(&"NSE") {
+    if matches!(parts.first(), Some(&"NSE" | &"BSE")) {
         return parse_exchange_symbol(symbol, &parts);
     }
     let instrument = parts.first().copied().unwrap_or("");
@@ -754,14 +775,15 @@ fn parse_canonical(symbol: &str) -> Result<SymbolSpec, String> {
             })
         }
         _ => Err(format!(
-            "{symbol} is not a canonical symbol. Use NSE:PRODUCT:YYYY-MM-DD:FUT, NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE, NSE:PRODUCT:YYYY-MM-DD:STRIKE:PE, or NSE:PRODUCT:EQ"
+            "{symbol} is not a canonical symbol. Use NSE:PRODUCT:YYYY-MM-DD:FUT, BSE:PRODUCT:YYYY-MM-DD:FUT, NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE, NSE:PRODUCT:YYYY-MM-DD:STRIKE:PE, or NSE:PRODUCT:EQ"
         )),
     }
 }
 
 fn parse_exchange_symbol(symbol: &str, parts: &[&str]) -> Result<SymbolSpec, String> {
-    match parts {
-        ["NSE", product, "EQ"] => {
+    let exchange = parts.first().copied().unwrap_or("");
+    match &parts[1..] {
+        [product, "EQ"] => {
             if !ascii_product(product) {
                 return Err(format!("{symbol} is not a canonical stock symbol"));
             }
@@ -769,7 +791,7 @@ fn parse_exchange_symbol(symbol: &str, parts: &[&str]) -> Result<SymbolSpec, Str
                 product: (*product).to_owned(),
             })
         }
-        ["NSE", product, date, "FUT"] => {
+        [product, date, "FUT"] => {
             let (year, month, day) = canonical_date(symbol, date)?;
             if !ascii_product(product) {
                 return Err(format!("{symbol} is not a canonical futures symbol"));
@@ -782,7 +804,7 @@ fn parse_exchange_symbol(symbol: &str, parts: &[&str]) -> Result<SymbolSpec, Str
                 instrument: None,
             })
         }
-        ["NSE", product, date, strike_text, right] => {
+        [product, date, strike_text, right] => {
             let call = match *right {
                 "C" | "CE" => true,
                 "P" | "PE" => false,
@@ -805,7 +827,7 @@ fn parse_exchange_symbol(symbol: &str, parts: &[&str]) -> Result<SymbolSpec, Str
             })
         }
         _ => Err(format!(
-            "{symbol} is not a canonical symbol. Use NSE:PRODUCT:YYYY-MM-DD:FUT, NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE, NSE:PRODUCT:YYYY-MM-DD:STRIKE:PE, or NSE:PRODUCT:EQ"
+            "{symbol} is not a canonical symbol. Use {exchange}:PRODUCT:YYYY-MM-DD:FUT, {exchange}:PRODUCT:YYYY-MM-DD:STRIKE:CE, {exchange}:PRODUCT:YYYY-MM-DD:STRIKE:PE, or {exchange}:PRODUCT:EQ"
         )),
     }
 }
@@ -1200,28 +1222,35 @@ fn option_choices(matches: &[&SpanContract]) -> String {
         .join(", ")
 }
 
-fn canonical_symbol(contract: &SpanContract) -> String {
+fn canonical_symbol(exchange: &str, contract: &SpanContract) -> String {
     let Some(expiry) = contract.expiry else {
-        return format!("NSE:{}:EQ", contract.product);
+        return format!("{exchange}:{}:EQ", contract.product);
     };
-    canonical_parts(&contract.product, expiry, contract.strike, contract.kind)
+    canonical_parts(
+        exchange,
+        &contract.product,
+        expiry,
+        contract.strike,
+        contract.kind,
+    )
 }
 
 fn canonical_parts(
+    exchange: &str,
     product: &str,
     expiry: NaiveDate,
     strike: Option<Decimal>,
     kind: ContractKind,
 ) -> String {
     match kind {
-        ContractKind::Stock => format!("NSE:{product}:EQ"),
-        ContractKind::Future => format!("NSE:{product}:{expiry}:FUT"),
+        ContractKind::Stock => format!("{exchange}:{product}:EQ"),
+        ContractKind::Future => format!("{exchange}:{product}:{expiry}:FUT"),
         ContractKind::Call => format!(
-            "NSE:{product}:{expiry}:{}:CE",
+            "{exchange}:{product}:{expiry}:{}:CE",
             strike.unwrap_or(Decimal::ZERO).normalize()
         ),
         ContractKind::Put => format!(
-            "NSE:{product}:{expiry}:{}:PE",
+            "{exchange}:{product}:{expiry}:{}:PE",
             strike.unwrap_or(Decimal::ZERO).normalize()
         ),
     }
@@ -1314,6 +1343,11 @@ enum Tag {
     Strike,
     Ra,
     Value,
+    Exch,
+    PriceMeth,
+    Name,
+    PfLink,
+    PfType,
     CcDef,
     Cc,
     RiskExponent,
@@ -1349,6 +1383,11 @@ fn classify(name: &[u8]) -> Tag {
         b"k" => Tag::Strike,
         b"ra" => Tag::Ra,
         b"a" => Tag::Value,
+        b"exch" => Tag::Exch,
+        b"priceMeth" => Tag::PriceMeth,
+        b"name" => Tag::Name,
+        b"pfLink" => Tag::PfLink,
+        b"pfType" => Tag::PfType,
         b"ccDef" => Tag::CcDef,
         b"cc" => Tag::Cc,
         b"riskExponent" => Tag::RiskExponent,
@@ -1368,6 +1407,10 @@ fn classify(name: &[u8]) -> Tag {
 
 struct ExtractState<'a> {
     interest: &'a [SymbolSpec],
+    aliases: BTreeMap<String, String>,
+    exchange: Option<String>,
+    indexes: BTreeSet<String>,
+    price_method: Option<String>,
     business_date: Option<NaiveDate>,
     product: Option<String>,
     current: Option<Tag>,
@@ -1403,6 +1446,151 @@ struct ExtractState<'a> {
     spreads: BTreeMap<String, Vec<CalendarSpread>>,
 }
 
+struct CommodityFamily {
+    cc: String,
+    name: String,
+    portfolios: Vec<(String, String)>,
+}
+
+fn portfolio_aliases(
+    bytes: &[u8],
+    interest: &[SymbolSpec],
+) -> Result<BTreeMap<String, String>, String> {
+    let wanted = interest
+        .iter()
+        .map(SymbolSpec::product)
+        .filter(|product| *product == "SENSEX" || *product == "BSX")
+        .collect::<Vec<_>>();
+    if wanted.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let families = combined_commodities(bytes)?;
+    let mut aliases = BTreeMap::new();
+    for product in wanted {
+        let family = if product == "BSX" {
+            families.iter().find(|family| family.cc == "BSX")
+        } else {
+            families
+                .iter()
+                .find(|family| family.name == "BSE 30 SENSEX")
+        };
+        let Some(family) = family else {
+            return Err(if product == "SENSEX" {
+                "SPAN file has no combined commodity named BSE 30 SENSEX".to_owned()
+            } else {
+                "SPAN file has no combined commodity BSX".to_owned()
+            });
+        };
+        if !family
+            .portfolios
+            .iter()
+            .any(|(_, kind)| kind == "FUT" || kind == "PHY" || kind == "OOP")
+        {
+            return Err(format!(
+                "SPAN combined commodity {} has no portfolio link",
+                family.cc
+            ));
+        }
+        bind_alias(&mut aliases, &family.cc, product)?;
+        for (code, _) in &family.portfolios {
+            bind_alias(&mut aliases, code, product)?;
+        }
+    }
+    Ok(aliases)
+}
+
+fn bind_alias(
+    aliases: &mut BTreeMap<String, String>,
+    code: &str,
+    product: &str,
+) -> Result<(), String> {
+    if let Some(existing) = aliases.insert(code.to_owned(), product.to_owned())
+        && existing != product
+    {
+        return Err(format!(
+            "SPAN portfolio {code} belongs to more than one requested product"
+        ));
+    }
+    Ok(())
+}
+
+fn combined_commodities(bytes: &[u8]) -> Result<Vec<CommodityFamily>, String> {
+    let mut reader = Reader::from_reader(bytes);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut stack: Vec<Tag> = Vec::new();
+    let mut families = Vec::new();
+    let mut cc = None;
+    let mut name = None;
+    let mut portfolios = Vec::new();
+    let mut link_code = None;
+    let mut link_kind = None;
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| format!("SPAN XML could not be read: {error}"))?;
+        match event {
+            Event::Start(element) => {
+                let tag = classify(element.local_name().as_ref());
+                if tag == Tag::CcDef {
+                    cc = None;
+                    name = None;
+                    portfolios.clear();
+                }
+                if tag == Tag::PfLink {
+                    link_code = None;
+                    link_kind = None;
+                }
+                stack.push(tag);
+            }
+            Event::Empty(element) => {
+                let tag = classify(element.local_name().as_ref());
+                if tag == Tag::PfLink {
+                    portfolios.push((String::new(), String::new()));
+                }
+            }
+            Event::Text(text) => {
+                let value = text
+                    .unescape()
+                    .map_err(|error| format!("SPAN XML text could not be decoded: {error}"))?;
+                let parent = stack.last().copied();
+                let grandparent = stack.get(stack.len().wrapping_sub(2)).copied();
+                match (parent, grandparent) {
+                    (Some(Tag::Cc), Some(Tag::CcDef)) => cc = Some(value.to_string()),
+                    (Some(Tag::Name), Some(Tag::CcDef)) => name = Some(value.to_string()),
+                    (Some(Tag::PfCode), Some(Tag::PfLink)) => link_code = Some(value.to_string()),
+                    (Some(Tag::PfType), Some(Tag::PfLink)) => link_kind = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+            Event::End(element) => {
+                let tag = classify(element.local_name().as_ref());
+                stack.pop();
+                if tag == Tag::PfLink {
+                    portfolios.push((
+                        link_code.take().unwrap_or_default(),
+                        link_kind.take().unwrap_or_default(),
+                    ));
+                }
+                if tag == Tag::CcDef {
+                    let Some(code) = cc.take() else {
+                        return Err("SPAN combined commodity has no code".to_owned());
+                    };
+                    families.push(CommodityFamily {
+                        cc: code,
+                        name: name.take().unwrap_or_default(),
+                        portfolios: std::mem::take(&mut portfolios),
+                    });
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(families)
+}
+
 fn extract_contracts(
     bytes: &[u8],
     trading_date: NaiveDate,
@@ -1412,8 +1600,13 @@ fn extract_contracts(
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut stack = Vec::new();
+    let aliases = portfolio_aliases(bytes, interest)?;
     let mut state = ExtractState {
         interest,
+        aliases,
+        exchange: None,
+        indexes: BTreeSet::new(),
+        price_method: None,
         business_date: None,
         product: None,
         current: None,
@@ -1499,16 +1692,21 @@ fn extract_contracts(
         None => return Err("SPAN business date is missing".to_owned()),
     }
     Ok(Book {
+        exchange: state.exchange.unwrap_or_else(|| "NSE".to_owned()),
         contracts: state.contracts,
         commodities: state.commodities,
         underlyings: state.underlyings,
         spreads: state.spreads,
+        indexes: state.indexes,
     })
 }
 
 fn open_extract(state: &mut ExtractState<'_>, stack: &[Tag], tag: Tag) -> Result<(), String> {
     match tag {
-        Tag::FutPf | Tag::OopPf | Tag::PhyPf => state.product = None,
+        Tag::FutPf | Tag::OopPf | Tag::PhyPf => {
+            state.product = None;
+            state.price_method = None;
+        }
         Tag::Series => {
             state.series_expiry = None;
             state.series_cvf = None;
@@ -1587,6 +1785,14 @@ fn close_extract(
     parent: Option<Tag>,
 ) -> Result<(), String> {
     match tag {
+        Tag::FutPf | Tag::PhyPf | Tag::OopPf => {
+            if state.price_method.as_deref() == Some("IDX")
+                && let Some(product) = state.product.clone()
+            {
+                state.indexes.insert(book_product(state, &product));
+            }
+            state.price_method = None;
+        }
         Tag::Fut if parent == Some(Tag::FutPf) => finish_contract(state, ContractKind::Future)?,
         Tag::Phy if parent == Some(Tag::PhyPf) => finish_contract(state, ContractKind::Stock)?,
         Tag::Opt if parent == Some(Tag::Series) => {
@@ -1608,11 +1814,20 @@ fn close_extract(
     Ok(())
 }
 
+fn book_product(state: &ExtractState<'_>, file_code: &str) -> String {
+    state
+        .aliases
+        .get(file_code)
+        .cloned()
+        .unwrap_or_else(|| file_code.to_owned())
+}
+
 fn finish_contract(state: &mut ExtractState<'_>, kind: ContractKind) -> Result<(), String> {
-    let product = state
+    let file_product = state
         .product
         .clone()
         .ok_or_else(|| format!("SPAN {} has no product code", kind.label()))?;
+    let product = book_product(state, &file_product);
     if kind != ContractKind::Stock && !state.expiry_seen {
         return Err(format!("SPAN {product} {} has no expiry", kind.label()));
     }
@@ -1724,6 +1939,7 @@ fn finish_commodity(state: &mut ExtractState<'_>) -> Result<(), String> {
         .commodity_name
         .take()
         .ok_or_else(|| "SPAN combined commodity has no name".to_owned())?;
+    let name = book_product(state, &name);
     let risk_exponent = state
         .risk_exponent
         .take()
@@ -1752,23 +1968,24 @@ fn finish_commodity(state: &mut ExtractState<'_>) -> Result<(), String> {
 }
 
 fn retained(state: &ExtractState<'_>) -> bool {
-    let Some(product) = state.product.as_deref() else {
+    let Some(file_product) = state.product.as_deref() else {
         return true;
     };
+    let product = book_product(state, file_product);
     match state.current {
         Some(Tag::Fut) => state
             .expiry
-            .is_some_and(|expiry| wants_future(state.interest, product, expiry)),
+            .is_some_and(|expiry| wants_future(state.interest, &product, expiry)),
         Some(Tag::Opt) => match (state.expiry, state.right, state.strike) {
             (Some(expiry), Some('C'), Some(strike)) => {
-                wants_option(state.interest, product, true, strike, expiry)
+                wants_option(state.interest, &product, true, strike, expiry)
             }
             (Some(expiry), Some('P'), Some(strike)) => {
-                wants_option(state.interest, product, false, strike, expiry)
+                wants_option(state.interest, &product, false, strike, expiry)
             }
             _ => true,
         },
-        Some(Tag::Phy) => wants_stock(state.interest, product),
+        Some(Tag::Phy) => wants_stock(state.interest, &product),
         _ => false,
     }
 }
@@ -1815,8 +2032,20 @@ fn take_extract(state: &mut ExtractState<'_>, stack: &[Tag], value: &str) -> Res
                     .map_err(|_| format!("SPAN spread expiry `{value}` is not YYYYMMDD"))?,
             );
         }
+        Tag::Exch if value == "NSE" || value == "BSE" => match &state.exchange {
+            Some(existing) if existing != value => {
+                return Err(format!(
+                    "SPAN exchange `{value}` conflicts with `{existing}`"
+                ));
+            }
+            Some(_) => {}
+            None => state.exchange = Some(value.to_owned()),
+        },
+        Tag::PriceMeth if matches!(grandparent, Some(Tag::FutPf | Tag::PhyPf | Tag::OopPf)) => {
+            state.price_method = Some(value.to_owned());
+        }
         Tag::Expiry if matches!(grandparent, Some(Tag::Fut | Tag::Phy)) => {
-            if grandparent == Some(Tag::Phy) && value == "00000000" {
+            if grandparent == Some(Tag::Phy) && (value == "00000000" || value == "000000") {
                 state.expiry = None;
                 state.expiry_seen = true;
             } else {
@@ -1942,7 +2171,7 @@ fn finish_spread(state: &mut ExtractState<'_>) -> Result<(), String> {
     }
     let wanted = legs
         .iter()
-        .any(|(name, _, _)| product_wanted(state.interest, name));
+        .any(|(name, _, _)| product_wanted(state.interest, book_product(state, name).as_str()));
     if !wanted {
         state.spread_number = None;
         state.spread_method = None;
@@ -1955,7 +2184,7 @@ fn finish_spread(state: &mut ExtractState<'_>) -> Result<(), String> {
                 .to_owned(),
         );
     }
-    let product = legs[0].0.clone();
+    let product = book_product(state, &legs[0].0);
     let number = state
         .spread_number
         .take()
@@ -2019,6 +2248,12 @@ struct StockElm {
 }
 
 impl ExposureRates {
+    pub fn none() -> Self {
+        Self {
+            stocks: BTreeMap::new(),
+        }
+    }
+
     pub fn parse_csv(bytes: &[u8], trading_date: NaiveDate) -> Result<Self, String> {
         let text =
             std::str::from_utf8(bytes).map_err(|_| "exposure file is not UTF-8".to_owned())?;
@@ -2026,7 +2261,7 @@ impl ExposureRates {
         let header = lines.next().unwrap_or_default().trim_end_matches('\r');
         let expected = format!(
             "Sr No.,Symbol,Instrument Type,Normal ELM Margin%,Additional ELM% for Trade Date {},Total applicable ELM%",
-            crate::nse_reports::display_date(trading_date)
+            crate::nse::reports::display_date(trading_date)
         );
         if header != expected {
             return Err(
@@ -2147,6 +2382,8 @@ struct ExtremeLoss {
 pub struct ContractElmRates {
     rows: BTreeMap<(String, NaiveDate, ContractKind, Option<Decimal>), Decimal>,
     listed: Vec<ListedContract>,
+    monthly_futures: BTreeMap<(String, i32, u32), Decimal>,
+    iccl: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2216,7 +2453,101 @@ impl ContractElmRates {
         if rows.is_empty() {
             return Err("contract ELM file has no rows".to_owned());
         }
-        Ok(Self { rows, listed })
+        Ok(Self {
+            rows,
+            listed,
+            monthly_futures: BTreeMap::new(),
+            iccl: false,
+        })
+    }
+
+    pub fn parse_iccl_zip(bytes: &[u8]) -> Result<Self, String> {
+        let entries = extract_zip_to_memory(bytes, ZipLimits::conservative(UNCOMPRESSED_LIMIT))
+            .map_err(|error| error.to_string())?;
+        if entries.len() != 1 || !entries[0].name.to_ascii_lowercase().ends_with(".csv") {
+            return Err("ICCL extreme loss zip does not contain one .csv member".to_owned());
+        }
+        Self::parse_iccl_csv(&entries[0].bytes)
+    }
+
+    fn parse_iccl_csv(bytes: &[u8]) -> Result<Self, String> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| "ICCL extreme loss file is not UTF-8".to_owned())?;
+        let mut monthly_futures = BTreeMap::new();
+        let mut rows_seen = 0_usize;
+        for (index, line) in text.lines().enumerate() {
+            let line = line.trim_end_matches('\r');
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split(',').collect();
+            if fields.len() != 6 {
+                return Err(format!(
+                    "ICCL extreme loss file row {} does not have 6 fields",
+                    index + 1
+                ));
+            }
+            if fields[0].trim().parse::<u64>().is_err() {
+                return Err(format!(
+                    "ICCL extreme loss file row {} token is not an integer",
+                    index + 1
+                ));
+            }
+            let normal = elm_percent(fields[3], index + 1, "normal")?;
+            let additional = elm_percent(fields[4], index + 1, "additional")?;
+            let total = elm_percent(fields[5], index + 1, "total")?;
+            if normal
+                .checked_add(additional)
+                .is_none_or(|sum| sum != total)
+            {
+                return Err(format!(
+                    "ICCL extreme loss total for {} is not the normal percent plus the additional percent",
+                    fields[1].trim()
+                ));
+            }
+            rows_seen += 1;
+            match fields[2].trim() {
+                "IF" | "SF" => {
+                    let Some((product, year, month)) = iccl_future_symbol(fields[1].trim()) else {
+                        return Err(format!(
+                            "ICCL extreme loss future `{}` is not PRODUCTYYMONFUT",
+                            fields[1].trim()
+                        ));
+                    };
+                    let key = (product, year, month);
+                    if let Some(existing) = monthly_futures.get(&key)
+                        && existing != &total
+                    {
+                        return Err(format!(
+                            "ICCL extreme loss file repeats {} with different percents",
+                            fields[1].trim()
+                        ));
+                    }
+                    monthly_futures.insert(key, total);
+                }
+                "IO" | "SO" => {}
+                other => {
+                    return Err(format!(
+                        "ICCL extreme loss instrument `{other}` is not IF, SF, IO, or SO"
+                    ));
+                }
+            }
+        }
+        if rows_seen == 0 {
+            return Err("ICCL extreme loss file has no data row".to_owned());
+        }
+        Ok(Self {
+            rows: BTreeMap::new(),
+            listed: Vec::new(),
+            monthly_futures,
+            iccl: true,
+        })
+    }
+
+    fn monthly_future(&self, product: &str, expiry: NaiveDate) -> Option<Decimal> {
+        self.monthly_futures
+            .get(&(product.to_owned(), expiry.year(), expiry.month()))
+            .copied()
     }
 
     pub fn parse_gzip(bytes: &[u8]) -> Result<Self, String> {
@@ -2367,7 +2698,7 @@ impl ListedContract {
     }
 
     fn canonical(&self) -> String {
-        canonical_parts(&self.product, self.expiry, self.strike, self.kind)
+        canonical_parts("NSE", &self.product, self.expiry, self.strike, self.kind)
     }
 }
 
@@ -2546,6 +2877,32 @@ fn contract_strike(
     }
 }
 
+fn iccl_future_symbol(symbol: &str) -> Option<(String, i32, u32)> {
+    let body = symbol.strip_suffix("FUT")?;
+    if body.len() < 5 {
+        return None;
+    }
+    let month_name = &body[body.len() - 3..];
+    let year_text = &body[body.len() - 5..body.len() - 3];
+    let product = &body[..body.len() - 5];
+    let month = u32::try_from(MONTHS.iter().position(|month| *month == month_name)? + 1).ok()?;
+    if !iccl_product(product) || !ascii_digits(year_text) {
+        return None;
+    }
+    let year = 2000 + year_text.parse::<i32>().ok()?;
+    Some((product.to_owned(), year, month))
+}
+
+fn iccl_product(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .any(|character| character.is_ascii_alphanumeric())
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '&'
+        })
+}
+
 fn published_or_contract(
     contracts: &ContractElmRates,
     product: &str,
@@ -2554,6 +2911,20 @@ fn published_or_contract(
     strike: Option<Decimal>,
     published: Decimal,
 ) -> Result<Decimal, String> {
+    if kind == ContractKind::Future
+        && let Some(expiry) = expiry
+        && let Some(percent) = contracts.monthly_future(product, expiry)
+    {
+        return Ok(percent);
+    }
+    if contracts.iccl && kind == ContractKind::Future {
+        let when = expiry
+            .map(|expiry| expiry.to_string())
+            .unwrap_or_else(|| "with no expiry".to_owned());
+        return Err(format!(
+            "ICCL extreme loss file has no future rate for {product} {when}"
+        ));
+    }
     if contracts.is_empty() {
         return Ok(published);
     }
@@ -3087,6 +3458,7 @@ mod tests {
     };
     use chrono::NaiveDate;
     use rust_decimal::Decimal;
+    use std::collections::BTreeMap;
 
     fn date() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 10, 28).expect("date")
@@ -3665,5 +4037,92 @@ mod tests {
         )
         .expect_err("same contract");
         assert!(repeated.contains("same contract"), "{repeated}");
+    }
+
+    #[test]
+    fn a_bse_sensex_future_uses_the_iccl_risk_array_and_extreme_loss_percent() {
+        let xml = r#"<spanFile>
+<pointInTime><date>20261028</date></pointInTime>
+<exchange><exch>BSE</exch></exchange>
+<phyPf><pfCode>BSX</pfCode><priceMeth>IDX</priceMeth>
+<phy><pe>000000</pe><p>85106.81</p><cvf>1</cvf><sc>1</sc>
+<ra><r>1</r><a>0</a><a>0</a></ra></phy></phyPf>
+<futPf><pfCode>BSXFUT</pfCode><priceMeth>IDX</priceMeth>
+<fut><pe>20261029</pe><p>100</p><cvf>1</cvf><sc>1</sc><d>1</d>
+<ra><r>1</r><a>-1</a><a>4</a></ra></fut>
+<fut><pe>20261126</pe><p>100</p><cvf>1</cvf><sc>1</sc><d>1</d>
+<ra><r>1</r><a>-1</a><a>4</a></ra></fut></futPf>
+<futPf><pfCode>SX50FUT</pfCode><priceMeth>IDX</priceMeth>
+<fut><pe>20261029</pe><p>100</p><cvf>1</cvf><sc>1</sc><d>1</d>
+<ra><r>1</r><a>50</a><a>50</a></ra></fut></futPf>
+<ccDef><cc>BSX</cc><name>BSE 30 SENSEX</name>
+<riskExponent>0</riskExponent><cmbMeth>NONE</cmbMeth>
+<pfLink><pfCode>BSX</pfCode><pfType>PHY</pfType></pfLink>
+<pfLink><pfCode>BSXFUT</pfCode><pfType>FUT</pfType></pfLink>
+<somTiers><tier><tn>0</tn><rate><r>1</r><val>0</val></rate></tier></somTiers>
+</ccDef>
+<ccDef><cc>SX50</cc><name>S&amp;P BSE SENSEX 50</name>
+<riskExponent>0</riskExponent><cmbMeth>NONE</cmbMeth>
+<pfLink><pfCode>SX50FUT</pfCode><pfType>FUT</pfType></pfLink>
+</ccDef>
+</spanFile>"#;
+        let rates = ContractElmRates::parse_iccl_csv(
+            b"864571,SENSEX26OCTFUT,IF,3.50,0.00,3.50\r\n864571,SENSEX26OCTFUT,IF,3.50,0.00,3.50\r\n",
+        )
+        .expect("elm");
+        let quote = quote_span_xml(
+            xml.as_bytes(),
+            date(),
+            &[position("BSE:SENSEX:2026-10-29:FUT", "-10")],
+            &ExposureRates {
+                stocks: BTreeMap::new(),
+            },
+            &rates,
+            &CashMarginRates::default(),
+        )
+        .expect("sensex");
+        assert_eq!(quote.lines[0].canonical, "BSE:SENSEX:2026-10-29:FUT");
+        assert_eq!(quote.lines[0].product, "SENSEX");
+        assert_eq!(quote.scanning_risk, amount("10"));
+        assert_eq!(quote.extreme_loss_margin, amount("35"));
+        assert_eq!(quote.delivery_margin, amount("0"));
+        assert_eq!(quote.premium, amount("0"));
+        assert_eq!(quote.total_margin, amount("45"));
+        assert_eq!(quote.lines[0].elm_percent, amount("3.50"));
+
+        let missing = quote_span_xml(
+            xml.as_bytes(),
+            date(),
+            &[position("BSE:SENSEX:2026-11-26:FUT", "-1")],
+            &ExposureRates {
+                stocks: BTreeMap::new(),
+            },
+            &rates,
+            &CashMarginRates::default(),
+        )
+        .expect_err("november");
+        assert!(missing.contains("no future rate"), "{missing}");
+    }
+
+    #[test]
+    fn iccl_extreme_loss_symbols_may_contain_a_hyphen_or_ampersand() {
+        let rates = ContractElmRates::parse_iccl_csv(
+            b"1,BAJAJ-AUTO26OCTFUT,IF,2.00,0.00,2.00\n\
+              2,M&M26OCTFUT,IF,3.00,0.00,3.00\n\
+              3,GVT&D26OCTFUT,SF,2.50,0.00,2.50\n\
+              4,NAM-INDIA26OCTFUT,IF,1.00,0.00,1.00\n",
+        )
+        .expect("symbols");
+        let october = date();
+        assert_eq!(
+            rates.monthly_future("BAJAJ-AUTO", october),
+            Some(amount("2.00"))
+        );
+        assert_eq!(rates.monthly_future("M&M", october), Some(amount("3.00")));
+        assert_eq!(rates.monthly_future("GVT&D", october), Some(amount("2.50")));
+        assert_eq!(
+            rates.monthly_future("NAM-INDIA", october),
+            Some(amount("1.00"))
+        );
     }
 }

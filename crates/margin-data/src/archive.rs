@@ -1,8 +1,8 @@
 use crate::DataError;
 use crate::hash::sha256_hex;
-use crate::nse_reports::PARSER_VERSION;
 use crate::postgres::{DatasetRow, dataset_from_row, db_error_message, select_columns};
 use crate::redact::sanitize_audit_fields;
+use crate::span::xml::PARSER_VERSION;
 use chrono::{DateTime, Utc};
 use margin_domain::{
     ClearingCorporation, DatasetId, DatasetOrigin, Exchange, PublicationStatus, RiskDataset,
@@ -12,7 +12,8 @@ use sqlx::PgPool;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-const SPAN_SIGN: &str = "NSE Clearing SPAN risk array: loss is positive and gain is negative";
+pub(crate) const SPAN_SIGN: &str =
+    "NSE Clearing SPAN risk array: loss is positive and gain is negative";
 const AUXILIARY_NOTE: &str = "original bytes archived; values were not applied as margin parameters; this file is not a margin";
 const DUPLICATE_NOTE: &str = "existing bytes were reused; no second version was stored";
 
@@ -46,6 +47,7 @@ pub(crate) struct SpanArchiveRequest {
     pub rejection: Option<String>,
     pub scan_points: Vec<u32>,
     pub risk_array_count: u64,
+    pub sign_convention: String,
 }
 
 pub(crate) struct AuxiliaryArchiveRequest {
@@ -382,7 +384,13 @@ async fn insert_span(
         return Err(map_insert(error));
     }
     if dataset.validation_status() != ValidationStatus::Failed {
-        insert_scan_points(&mut tx, dataset.id(), &request.scan_points).await?;
+        insert_scan_points(
+            &mut tx,
+            dataset.id(),
+            &request.scan_points,
+            &request.sign_convention,
+        )
+        .await?;
     }
     let status = if dataset.validation_status() == ValidationStatus::Failed {
         "rejected"
@@ -623,6 +631,7 @@ async fn insert_scan_points(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dataset_id: margin_domain::DatasetId,
     points: &[u32],
+    sign_convention: &str,
 ) -> Result<(), InsertError> {
     for point in points {
         let index = i32::try_from(*point).map_err(|_| {
@@ -639,7 +648,7 @@ async fn insert_scan_points(
         .bind(dataset_id.as_uuid())
         .bind(index)
         .bind(format!("scan-point-{point}"))
-        .bind(SPAN_SIGN)
+        .bind(sign_convention)
         .execute(&mut **tx)
         .await
         .map_err(map_insert)?;
@@ -721,7 +730,8 @@ fn map_insert(error: sqlx::Error) -> InsertError {
 #[cfg(test)]
 mod tests {
     use super::{AuxiliaryArchiveRequest, SpanArchiveRequest, archive_auxiliary, archive_span};
-    use crate::nse_reports::{SPAN_FILE_FORMAT, check_span_container};
+    use crate::nse::reports::SPAN_FILE_FORMAT;
+    use crate::span::xml::check_span_container;
     use chrono::NaiveDate;
     use margin_domain::{ClearingCorporation, Exchange, SnapshotLocator};
     use std::io::{Cursor, Write};
@@ -766,6 +776,7 @@ mod tests {
             rejection: None,
             scan_points: report.scan_points.clone(),
             risk_array_count: report.risk_array_count,
+            sign_convention: super::SPAN_SIGN.to_owned(),
         };
         let first = archive_span(&pool, request).await.expect("archive");
         let second = archive_span(
@@ -784,6 +795,7 @@ mod tests {
                 rejection: None,
                 scan_points: report.scan_points.clone(),
                 risk_array_count: report.risk_array_count,
+                sign_convention: super::SPAN_SIGN.to_owned(),
             },
         )
         .await
