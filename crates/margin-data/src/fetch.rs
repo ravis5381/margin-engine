@@ -1,6 +1,7 @@
 use crate::nse_reports::{
     NSE_HOST, NSE_REFERER, NSE_REPORTS_PATH, NSE_SESSION_REFERER, NSE_SESSION_URL, NSE_USER_AGENT,
-    NseReportKind, content_disposition_filename, media_type_matches, reports_url,
+    NSE_VAR_HOST, NseReportKind, cash_var_url, content_disposition_filename, contract_master_url,
+    media_type_matches, reports_url,
 };
 use crate::{DataError, DownloadPolicy, enforce_size_limit};
 use chrono::NaiveDate;
@@ -107,6 +108,107 @@ pub(crate) async fn download_nse_report(
         filename,
         bytes,
         source_host: NSE_HOST.to_owned(),
+    })
+}
+
+pub(crate) async fn download_contract_master(
+    client: &reqwest::Client,
+    policy: &DownloadPolicy,
+    trading_date: NaiveDate,
+) -> Result<DownloadedReport, DataError> {
+    let url = contract_master_url(trading_date)?;
+    policy.authorize(&url)?;
+    let filename = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| DataError::DownloadRejected {
+            detail: "contract master URL has no filename".to_owned(),
+        })?
+        .to_owned();
+    let response = client
+        .get(url)
+        .header(USER_AGENT, NSE_USER_AGENT)
+        .header(ACCEPT, "*/*")
+        .send()
+        .await
+        .map_err(|error| DataError::DownloadRejected {
+            detail: format!("contract master request failed: {error}"),
+        })?;
+    let status = response.status();
+    if status == StatusCode::NOT_FOUND {
+        return Err(DataError::DownloadRejected {
+            detail: format!(
+                "no official file was published for the contract master on {trading_date}"
+            ),
+        });
+    }
+    if status != StatusCode::OK {
+        return Err(DataError::DownloadRejected {
+            detail: format!("contract master request returned HTTP {status}"),
+        });
+    }
+    if response.url().host_str() != Some(NSE_VAR_HOST) {
+        return Err(DataError::DownloadRejected {
+            detail: "contract master response left the approved NSE archive host".to_owned(),
+        });
+    }
+    let bytes = read_limited(response, policy.max_bytes()).await?;
+    Ok(DownloadedReport {
+        filename,
+        bytes,
+        source_host: NSE_VAR_HOST.to_owned(),
+    })
+}
+
+pub(crate) async fn download_cash_var(
+    client: &reqwest::Client,
+    policy: &DownloadPolicy,
+    trading_date: NaiveDate,
+    batch: u8,
+) -> Result<DownloadedReport, DataError> {
+    let url = cash_var_url(trading_date, batch)?;
+    policy.authorize(&url)?;
+    let filename = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| DataError::DownloadRejected {
+            detail: "cash-market VaR URL has no filename".to_owned(),
+        })?
+        .to_owned();
+    let response = client
+        .get(url)
+        .header(USER_AGENT, NSE_USER_AGENT)
+        .header(ACCEPT, "*/*")
+        .send()
+        .await
+        .map_err(|error| DataError::DownloadRejected {
+            detail: format!("cash-market VaR request failed: {error}"),
+        })?;
+    let status = response.status();
+    if status == StatusCode::NOT_FOUND {
+        return Err(DataError::DownloadRejected {
+            detail: format!(
+                "no official file was published for cash-var batch {batch} on {trading_date}"
+            ),
+        });
+    }
+    if status != StatusCode::OK {
+        return Err(DataError::DownloadRejected {
+            detail: format!("cash-market VaR request returned HTTP {status}"),
+        });
+    }
+    if response.url().host_str() != Some(NSE_VAR_HOST) {
+        return Err(DataError::DownloadRejected {
+            detail: "cash-market VaR response left the NSE archive host".to_owned(),
+        });
+    }
+    let bytes = read_limited(response, policy.max_bytes()).await?;
+    Ok(DownloadedReport {
+        filename,
+        bytes,
+        source_host: NSE_VAR_HOST.to_owned(),
     })
 }
 

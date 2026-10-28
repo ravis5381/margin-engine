@@ -1,6 +1,5 @@
 use crate::DataError;
 use crate::span_quote::MarginPosition;
-use chrono::NaiveDate;
 use margin_domain::{
     ClearingCorporation, DatasetId, DatasetOrigin, Exchange, RiskDataset, SnapshotClass,
     ValidationStatus,
@@ -172,13 +171,13 @@ impl AppStore {
         &self,
         exchange: Exchange,
         clearing: ClearingCorporation,
-        trading_date: NaiveDate,
+        trading_datetime: chrono::NaiveDateTime,
         positions: &[MarginPosition],
     ) -> Result<crate::StoredSpanQuote, DataError> {
         match self {
             Self::Postgres(store) => {
                 store
-                    .span_margin(exchange, clearing, trading_date, positions)
+                    .span_margin(exchange, clearing, trading_datetime, positions)
                     .await
             }
             Self::Memory(_) => Err(DataError::MarginRejected {

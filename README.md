@@ -8,7 +8,8 @@ It does not replicate NSE Clearing or ICCL margin calculations. Verified NSE
 SPAN, exposure, and contract-ELM files can be downloaded and archived. The SPAN
 member is parsed as XML-based SPAN 4.00. The margin quote returns scanning
 risk, the calendar-spread charge, extreme loss margin from the contract-wise
-file, option premium, and delivery margin. Far-month futures in a spread are
+file, option premium, and delivery margin from an archived cash-market VaR
+file. Far-month futures in a spread are
 charged one third of the contract percent. Cross-margin benefit is zero.
 Reported amounts are rounded half away
 from zero to paise. Risk-array amounts stay in the archived SPAN file.
@@ -52,8 +53,10 @@ Both conditions are required. This build implements neither the official
 calculation nor a verified dataset.
 
 Swagger UI is served at `/swagger-ui`. The OpenAPI document is
-`GET /api/v1/openapi.json`. Both describe the routes that exist. They do not
-list margin calculation, ingestion, or reconciliation operations.
+`GET /api/v1/openapi.json`. Both describe the routes that exist, including
+`POST /api/v1/margin/calculate` and `POST /api/v1/instruments/canonical`.
+They do not list ingestion or reconciliation
+operations.
 
 ## Database
 

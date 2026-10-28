@@ -6,11 +6,13 @@
 //! 1425/2012. NSE Clearing states that a risk-array loss is positive and a gain
 //! is negative. This parser checks that document. It does not calculate margin.
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
+use flate2::read::DeflateDecoder;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::str::FromStr;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +20,72 @@ pub(crate) struct SpanXmlReport {
     pub scan_points: Vec<u32>,
     pub rate_count: u32,
     pub risk_array_count: u64,
+}
+
+/// The `<created>` clock in an NSE SPAN zip. The value is `YYYYMMDDHHMM` with no
+/// offset. The observed files use India Standard Time.
+pub(crate) fn span_created_timestamp(zip_prefix: &[u8]) -> Result<NaiveDateTime, String> {
+    let payload = span_member_prefix(zip_prefix)?;
+    let text = String::from_utf8_lossy(&payload);
+    let start = text
+        .find("<created>")
+        .ok_or_else(|| "SPAN file has no created time".to_owned())?
+        + "<created>".len();
+    let rest = &text[start..];
+    let end = rest
+        .find("</created>")
+        .ok_or_else(|| "SPAN created time is truncated".to_owned())?;
+    let stamp = rest[..end].trim();
+    NaiveDateTime::parse_from_str(stamp, "%Y%m%d%H%M")
+        .map_err(|_| format!("SPAN created time {stamp} is not YYYYMMDDHHMM"))
+}
+
+fn span_member_prefix(zip_prefix: &[u8]) -> Result<Vec<u8>, String> {
+    if zip_prefix.len() < 30 || &zip_prefix[..4] != b"PK\x03\x04" {
+        return Err("SPAN zip prefix is not a zip local header".to_owned());
+    }
+    let method = u16::from_le_bytes([zip_prefix[8], zip_prefix[9]]);
+    let name_len = u16::from_le_bytes([zip_prefix[26], zip_prefix[27]]) as usize;
+    let extra_len = u16::from_le_bytes([zip_prefix[28], zip_prefix[29]]) as usize;
+    let start = 30 + name_len + extra_len;
+    if zip_prefix.len() <= start {
+        return Err("SPAN zip prefix ends before the member".to_owned());
+    }
+    let compressed = &zip_prefix[start..];
+    match method {
+        0 => Ok(compressed.to_vec()),
+        8 => inflate_until_created(compressed),
+        _ => Err(format!(
+            "SPAN zip compression method {method} is not deflate"
+        )),
+    }
+}
+
+fn inflate_until_created(compressed: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoder = DeflateDecoder::new(compressed);
+    let mut out = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match decoder.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                out.extend_from_slice(&buffer[..read]);
+                if out.windows(10).any(|window| window == b"</created>") || out.len() > 65_536 {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof && !out.is_empty() => {
+                break;
+            }
+            Err(error) => {
+                return Err(format!("SPAN zip member could not be inflated: {error}"));
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("SPAN zip member produced no XML".to_owned());
+    }
+    Ok(out)
 }
 
 pub(crate) fn parse_span_xml(
@@ -342,7 +410,7 @@ impl ParseState {
 #[cfg(test)]
 mod tests {
     use super::parse_span_xml;
-    use chrono::NaiveDate;
+    use chrono::{NaiveDate, NaiveDateTime};
 
     fn date() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 10, 27).expect("date")
@@ -386,5 +454,48 @@ mod tests {
             "<fileFormat>3.00</fileFormat>",
         );
         assert!(parse_span_xml(other_format.as_bytes(), trading_date).is_err());
+    }
+
+    #[test]
+    fn the_created_clock_is_read_from_a_deflated_span_member() {
+        let payload = b"<spanFile><created>202610281403</created></spanFile>";
+        let compressed = {
+            use flate2::Compression;
+            use flate2::write::DeflateEncoder;
+            use std::io::Write;
+            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(payload).expect("deflate");
+            encoder.finish().expect("finish")
+        };
+        let zip = local_zip(
+            b"nsccl.20261028.i04.spn",
+            8,
+            &compressed,
+            payload.len() as u32,
+        );
+        let created = super::span_created_timestamp(&zip).expect("created");
+        assert_eq!(
+            created,
+            NaiveDateTime::parse_from_str("202610281403", "%Y%m%d%H%M").expect("stamp")
+        );
+        assert!(super::span_created_timestamp(b"not a zip").is_err());
+    }
+
+    fn local_zip(name: &[u8], method: u16, payload: &[u8], uncompressed: u32) -> Vec<u8> {
+        let mut zip = Vec::new();
+        zip.extend_from_slice(b"PK\x03\x04");
+        zip.extend_from_slice(&20_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&method.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(&0_u32.to_le_bytes());
+        zip.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&uncompressed.to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0_u16.to_le_bytes());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(payload);
+        zip
     }
 }

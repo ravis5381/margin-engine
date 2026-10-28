@@ -8,6 +8,9 @@ host = "www.nseclearing.in"
 host = "www.nseindia.com"
 
 [[approved_hosts]]
+host = "nsearchives.nseindia.com"
+
+[[approved_hosts]]
 host = "www.icclindia.com"
 
 [[approved_hosts]]

@@ -19,6 +19,7 @@ use std::io::Read;
 
 pub const NSE_SOURCE_ID: &str = "nse-clearing-equity-derivatives";
 pub const NSE_HOST: &str = "www.nseindia.com";
+pub const NSE_VAR_HOST: &str = "nsearchives.nseindia.com";
 pub const NSE_REPORTS_PATH: &str = "/api/reports";
 pub const NSE_SESSION_URL: &str = "https://www.nseindia.com/all-reports-derivatives";
 pub const NSE_SESSION_REFERER: &str = "https://www.nseindia.com/";
@@ -62,6 +63,26 @@ impl NseReportKind {
         };
         kind.ensure_valid()?;
         Ok(kind)
+    }
+
+    pub fn margin_files() -> [Self; 8] {
+        [
+            Self::SpanEndOfDay,
+            Self::SpanIntraday(4),
+            Self::SpanIntraday(3),
+            Self::SpanIntraday(2),
+            Self::SpanIntraday(1),
+            Self::SpanBeginOfDay,
+            Self::ExposureLimit,
+            Self::ContractElm,
+        ]
+    }
+
+    pub fn is_span(self) -> bool {
+        matches!(
+            self,
+            Self::SpanBeginOfDay | Self::SpanIntraday(_) | Self::SpanEndOfDay
+        )
     }
 
     pub const fn codes() -> &'static [&'static str] {
@@ -195,6 +216,40 @@ pub fn reports_url(kind: NseReportKind, trading_date: NaiveDate) -> Result<Url, 
         .append_pair("type", "equity")
         .append_pair("mode", "single");
     Ok(url)
+}
+
+pub fn contract_master_url(trading_date: NaiveDate) -> Result<Url, DataError> {
+    let filename = format!(
+        "NSE_FO_contract_{:02}{:02}{:04}.csv.gz",
+        trading_date.day(),
+        trading_date.month(),
+        trading_date.year()
+    );
+    Url::parse(&format!("https://{NSE_VAR_HOST}/content/fo/{filename}")).map_err(|_| {
+        DataError::Configuration {
+            detail: "contract master URL could not be built".to_owned(),
+        }
+    })
+}
+
+pub fn cash_var_url(trading_date: NaiveDate, batch: u8) -> Result<Url, DataError> {
+    if !(1..=6).contains(&batch) {
+        return Err(DataError::Configuration {
+            detail: "cash-market VaR batches are numbered 1 to 6".to_owned(),
+        });
+    }
+    let filename = format!(
+        "C_VAR1_{:02}{:02}{:04}_{batch}.DAT",
+        trading_date.day(),
+        trading_date.month(),
+        trading_date.year()
+    );
+    Url::parse(&format!(
+        "https://{NSE_VAR_HOST}/archives/nsccl/var/{filename}"
+    ))
+    .map_err(|_| DataError::Configuration {
+        detail: "cash-market VaR URL could not be built".to_owned(),
+    })
 }
 
 pub fn is_verified_reports_endpoint(url: &Url) -> bool {

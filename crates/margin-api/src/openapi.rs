@@ -5,7 +5,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use utoipa::OpenApi;
 
-use crate::margin::{MarginLineBody, MarginRequest, MarginResponse};
+use crate::margin::{
+    CanonicalInstrumentRequest, CanonicalInstrumentResponse, MarginLineBody, MarginRequest,
+    MarginResponse,
+};
 use crate::{
     DataStatusBody, DatasetBody, DatasetEnvelope, DatasetListBody, ErrorBody, ErrorDetail,
     HealthBody, ReadinessBody, ReadinessCheckBody,
@@ -14,10 +17,11 @@ use crate::{
 const DESCRIPTION: &str = "\
 HTTP API for liveness, readiness, archived risk-dataset metadata, and SPAN margin.\n\n\
 This build does not replicate NSE Clearing or ICCL margin calculations. \
-The margin route returns scanning risk, the calendar-spread charge, extreme loss margin, option premium, and delivery margin for futures, options, and physical stocks. \
+The margin route takes a trade datetime and returns scanning risk, the calendar-spread charge, extreme loss margin, option premium, and delivery margin for futures, options, and physical stocks from the SPAN file current at that time. \
 Cross-margin benefit is zero. \
 Reported amounts are rounded half away from zero to paise. \
-Ingestion, contract, and reconciliation routes are not published. \
+POST /api/v1/instruments/canonical builds the canonical instrument and does not return a margin. \
+Ingestion and reconciliation routes are not published. \
 The diagnostic scenario sum is not an API response and is not a margin.";
 
 #[derive(OpenApi)]
@@ -33,7 +37,8 @@ The diagnostic scenario sum is not an API response and is not a margin.";
         crate::data_status,
         crate::list_datasets,
         crate::get_dataset,
-        crate::margin::calculate_margin
+        crate::margin::calculate_margin,
+        crate::margin::canonical_instrument
     ),
     components(schemas(
         HealthBody,
@@ -47,12 +52,15 @@ The diagnostic scenario sum is not an API response and is not a margin.";
         ErrorDetail,
         MarginRequest,
         MarginResponse,
-        MarginLineBody
+        MarginLineBody,
+        CanonicalInstrumentRequest,
+        CanonicalInstrumentResponse
     )),
     tags(
         (name = "operations", description = "Liveness, readiness, and official-data status. These routes do not calculate margin."),
         (name = "risk-data", description = "Archived risk-dataset metadata. Responses contain no margin amounts."),
-        (name = "margin", description = "SPAN scanning risk, calendar-spread charge, extreme loss margin, option premium, and delivery margin. Cross-margin benefit is zero.")
+        (name = "margin", description = "SPAN scanning risk, calendar-spread charge, extreme loss margin, option premium, and delivery margin. Cross-margin benefit is zero."),
+        (name = "instruments", description = "Canonical instrument symbols built from exchange, underlying, expiry, strike, and right. These routes do not calculate margin.")
     )
 )]
 struct ApiDoc;

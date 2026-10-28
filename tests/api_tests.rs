@@ -13,6 +13,7 @@ use tower::ServiceExt;
 fn state(datasets: Vec<margin_domain::RiskDataset>) -> AppState {
     AppState {
         store: AppStore::Memory(MemoryStore::new(datasets)),
+        config: None,
         body_limit: 2048,
         request_timeout: Duration::from_secs(2),
         max_concurrency: 4,
@@ -88,6 +89,12 @@ async fn an_official_dataset_does_not_make_the_service_ready() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["official_calculation_implemented"], false);
     assert_eq!(body["official_validated_datasets"], 0);
+    assert!(
+        body["margin_calculation"]
+            .as_str()
+            .expect("margin calculation")
+            .contains("SPAN margin")
+    );
     let synthetic = dataset(DatasetParts::published(
         Exchange::Nse,
         ClearingCorporation::Nscc,
@@ -165,8 +172,9 @@ async fn openapi_documents_published_routes_and_swagger_ui_loads() {
     assert!(paths.contains_key("/api/v1/risk-data/datasets"));
     assert!(paths.contains_key("/api/v1/risk-data/datasets/{dataset_id}"));
     assert!(paths.contains_key("/api/v1/margin/calculate"));
+    assert!(paths.contains_key("/api/v1/instruments/canonical"));
     assert!(!paths.contains_key("/api/v1/risk-data/ingest"));
-    assert_eq!(paths.len(), 6);
+    assert_eq!(paths.len(), 7);
 
     let response = router(state(Vec::new()))
         .oneshot(
@@ -212,12 +220,200 @@ async fn openapi_documents_published_routes_and_swagger_ui_loads() {
     assert!(script.contains("/api/v1/openapi.json"));
 }
 
+async fn post_margin(body: &str) -> (StatusCode, serde_json::Value) {
+    let response = router(state(Vec::new()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/margin/calculate")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_owned()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+fn request_error(body: &serde_json::Value) -> &str {
+    body["error"]["message"].as_str().unwrap_or("")
+}
+
+#[tokio::test]
+async fn margin_requests_are_validated_before_the_archive_is_read() {
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert!(
+        request_error(&body).contains("at least one position"),
+        "{body}"
+    );
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"BSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"symbol":"NIFTY26NOVFUT","quantity":"-65"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(request_error(&body).contains("NSE"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"28-10-2026","positions":[{"symbol":"NIFTY26NOVFUT","quantity":"-65"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(request_error(&body).contains("YYYY-MM-DD"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"symbol":"NIFTY26NOVFUT","underlying":"NIFTY","expiry":"2026-11-23","right":"FUT","quantity":"-65"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(request_error(&body).contains("not both"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-23","strike":"26000","right":"FUT","quantity":"-65"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(request_error(&body).contains("no strike"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-03","right":"C","quantity":"-65"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(request_error(&body).contains("strike"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-03","strike":"0","right":"PE","quantity":"-65"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(request_error(&body).contains("positive"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"RELIANCE","expiry":"2026-11-26","right":"EQ","quantity":"1"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(request_error(&body).contains("physical stock"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-23","right":"FUT","quantity":"0"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(request_error(&body).contains("zero"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"symbol":"NIFTY26NOVFUT","quantity":"-65"},{"symbol":"nifty26novfut","quantity":"65"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(request_error(&body).contains("repeated"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"symbol":"NOT A SYMBOL","quantity":"1"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert!(!request_error(&body).contains("memory store"), "{body}");
+
+    let (status, body) = post_margin(
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-23","right":"FUT","quantity":"-65"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "margin_rejected");
+    assert!(request_error(&body).contains("memory store"), "{body}");
+}
+
+#[tokio::test]
+async fn canonical_instrument_is_built_from_the_contract_fields() {
+    let (status, body) = post_margin_path(
+        "/api/v1/instruments/canonical",
+        r#"{"exchange":"NSE","underlying":"nifty","expiry":"2026-11-23","right":"FUT"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["canonical"], "NSE:NIFTY:2026-11-23:FUT");
+    assert_eq!(body["underlying"], "NIFTY");
+    assert_eq!(body["expiry"], "2026-11-23");
+    assert!(body["strike"].is_null());
+    assert_eq!(body["right"], "FUT");
+    assert!(body.get("total_margin").is_none());
+
+    let (status, body) = post_margin_path(
+        "/api/v1/instruments/canonical",
+        r#"{"exchange":"NSE","underlying":"NIFTY","expiry":"2026-11-03","strike":"26000.00","right":"c"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["canonical"], "NSE:NIFTY:2026-11-03:26000:CE");
+    assert_eq!(body["strike"], "26000");
+    assert_eq!(body["right"], "CE");
+
+    let (status, body) = post_margin_path(
+        "/api/v1/instruments/canonical",
+        r#"{"exchange":"NSE","underlying":"RELIANCE","right":"EQ"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["canonical"], "NSE:RELIANCE:EQ");
+    assert!(body["expiry"].is_null());
+
+    let (status, body) = post_margin_path(
+        "/api/v1/instruments/canonical",
+        r#"{"exchange":"NSE","underlying":"NIFTY","expiry":"2026-11-23","strike":"26000","right":"FUT"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert!(request_error(&body).contains("no strike"), "{body}");
+}
+
+async fn post_margin_path(uri: &str, body: &str) -> (StatusCode, serde_json::Value) {
+    let response = router(state(Vec::new()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_owned()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
 #[tokio::test]
 async fn unavailable_database_is_not_ready_and_lists_no_data() {
     let state = AppState {
         store: AppStore::Unavailable {
             reason: "DATABASE_URL is not set".to_owned(),
         },
+        config: None,
         body_limit: 1024,
         request_timeout: Duration::from_secs(1),
         max_concurrency: 2,

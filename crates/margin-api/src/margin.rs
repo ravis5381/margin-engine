@@ -2,8 +2,11 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use chrono::NaiveDate;
-use margin_data::{DataError, MarginPosition};
+use chrono::{DateTime, FixedOffset, NaiveDateTime};
+use margin_data::{
+    AppStore, DataError, MarginPosition, canonical_contract_symbol, check_margin_positions,
+    ensure_nse_margin_files,
+};
 use margin_domain::{ClearingCorporation, Exchange};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -16,35 +19,138 @@ fn money(amount: Decimal) -> String {
     amount.normalize().to_string()
 }
 
+fn ist_stamp(value: NaiveDateTime) -> String {
+    format!("{}+05:30", value.format("%Y-%m-%dT%H:%M:%S"))
+}
+
+fn parse_trading_datetime(value: &str) -> Result<NaiveDateTime, String> {
+    let value = value.trim();
+    let ist = FixedOffset::east_opt(5 * 3600 + 30 * 60).expect("IST");
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Ok(parsed.with_timezone(&ist).naive_local());
+    }
+    for format in [
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(parsed) = NaiveDateTime::parse_from_str(value, format) {
+            return Ok(parsed);
+        }
+    }
+    Err(
+        "trading_datetime must be YYYY-MM-DDTHH:MM:SS in IST, or an RFC3339 datetime with an offset"
+            .to_owned(),
+    )
+}
+
+fn filled(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn prepare_book(
+    request: &MarginRequest,
+) -> Result<(Exchange, NaiveDateTime, Vec<MarginPosition>), String> {
+    let exchange = Exchange::parse(request.exchange.trim()).map_err(|error| error.to_string())?;
+    if exchange != Exchange::Nse {
+        return Err("SPAN margin is available for archived NSE files".to_owned());
+    }
+    let trading_datetime = parse_trading_datetime(&request.trading_datetime)?;
+    if request.positions.is_empty() {
+        return Err("at least one position is required".to_owned());
+    }
+    if request.positions.len() > 32 {
+        return Err("a margin quote accepts at most 32 positions".to_owned());
+    }
+    let mut positions = Vec::with_capacity(request.positions.len());
+    for position in &request.positions {
+        let symbol = position_symbol(exchange, position)?;
+        let quantity = Decimal::from_str(position.quantity.trim())
+            .map_err(|_| format!("quantity for {symbol} must be a decimal string"))?;
+        if quantity == Decimal::ZERO {
+            return Err(format!("quantity for {symbol} is zero"));
+        }
+        positions.push(MarginPosition { symbol, quantity });
+    }
+    check_margin_positions(&positions)?;
+    Ok((exchange, trading_datetime, positions))
+}
+
+fn position_symbol(exchange: Exchange, position: &MarginPositionRequest) -> Result<String, String> {
+    let underlying = filled(&position.underlying);
+    let expiry = filled(&position.expiry);
+    let strike = filled(&position.strike);
+    let right = filled(&position.right);
+    let structured =
+        underlying.is_some() || expiry.is_some() || strike.is_some() || right.is_some();
+    let symbol = filled(&position.symbol);
+    match (symbol, structured) {
+        (None, false) => {
+            Err("a position needs a symbol or underlying, expiry, and FUT, C, or P".to_owned())
+        }
+        (Some(_), true) => Err("send a symbol or the contract fields, not both".to_owned()),
+        (Some(symbol), false) => Ok(symbol.to_owned()),
+        (None, true) => canonical_contract_symbol(
+            exchange.code(),
+            underlying.ok_or_else(|| "underlying must be the product code".to_owned())?,
+            expiry,
+            strike,
+            right.ok_or_else(|| "right must be FUT, C, P, CE, PE, or EQ".to_owned())?,
+        ),
+    }
+}
+
 #[derive(Deserialize, ToSchema)]
 #[schema(
-    description = "Book to value from the archived SPAN file for one trading date. Symbols may be a monthly future (NIFTY26NOVFUT), a dated future (RELIANCE26N26FUT), a monthly or dated option (NIFTY26NOV26000CE, NIFTY26N0326000CE), or a physical stock (RELIANCE)."
+    description = "One NSE trade datetime and its positions. The datetime selects the latest SPAN file whose created time is at or before that moment. A time without an offset is India Standard Time, the clock in the SPAN file. A position sends either a symbol or underlying, expiry, strike, and right. Sending both is rejected. This does not replicate NSE Clearing or ICCL."
 )]
 pub struct MarginRequest {
     #[schema(example = "NSE")]
     exchange: String,
-    #[schema(example = "2026-10-28")]
-    trading_date: String,
+    #[schema(example = "2026-10-28T14:30:00+05:30")]
+    trading_datetime: String,
     positions: Vec<MarginPositionRequest>,
 }
 
 #[derive(Deserialize, ToSchema)]
+#[schema(
+    description = "Either symbol, or underlying with right. Right is FUT, C, P, CE, PE, or EQ. A future needs expiry and no strike. An option needs expiry and a positive strike. Quantity is a non-zero decimal string."
+)]
 pub struct MarginPositionRequest {
-    #[schema(example = "NIFTY26NOVFUT")]
-    symbol: String,
+    #[schema(example = "NSE:NIFTY:2026-11-23:FUT")]
+    #[serde(default)]
+    symbol: Option<String>,
+    #[schema(example = "NIFTY")]
+    #[serde(default)]
+    underlying: Option<String>,
+    #[schema(example = "2026-11-23")]
+    #[serde(default)]
+    expiry: Option<String>,
+    #[schema(example = "26000")]
+    #[serde(default)]
+    strike: Option<String>,
+    #[schema(example = "FUT")]
+    #[serde(default)]
+    right: Option<String>,
     #[schema(example = "-65")]
     quantity: String,
 }
 
 #[derive(Serialize, ToSchema)]
 #[schema(
-    description = "SPAN scanning risk, spread charge, extreme loss margin, option premium, delivery margin, and the combined total. Amounts are decimal strings in INR, rounded half away from zero to paise. The total is SPAN margin plus exposure margin. A short option's premium is included. A book of only long options has a total of zero. Margin benefit is the reduction already reflected in a spread total."
+    description = "SPAN scanning risk, spread charge, extreme loss margin, option premium, delivery margin, and the combined total. Amounts are decimal strings in INR, rounded half away from zero to paise. The total is SPAN margin plus exposure margin plus delivery margin. A short option's premium is included. A book of only long options has a total equal to its delivery margin. Margin benefit is the reduction already reflected in a spread total, measured before delivery margin."
 )]
 pub struct MarginResponse {
     equivalence_claim: &'static str,
     method: &'static str,
     currency: &'static str,
     trading_date: String,
+    trading_datetime: String,
+    span_created: String,
     dataset_id: String,
     snapshot_class: String,
     intraday_sequence: Option<u32>,
@@ -68,6 +174,7 @@ pub struct MarginResponse {
 #[derive(Serialize, ToSchema)]
 pub struct MarginLineBody {
     symbol: String,
+    canonical: String,
     instrument: String,
     product: String,
     expiry: Option<String>,
@@ -80,6 +187,7 @@ pub struct MarginLineBody {
     elm_percent: String,
     premium: String,
     total_margin: String,
+    lot_size: Option<u32>,
     worst_scan_points: Vec<u32>,
 }
 
@@ -89,12 +197,12 @@ pub struct MarginLineBody {
     tag = "margin",
     operation_id = "calculate_margin",
     summary = "SPAN, extreme loss margin, and premium",
-    description = "Reads the newest official SPAN file, the exposure file, and the contract-wise ELM file archived for the trading date. A loss in the risk array is positive for a long unit. The greatest scenario loss is the SPAN scanning requirement. Offsetting expiries add the flat calendar-spread charge from the SPAN file. An index contract expiring on the trade date is not offset. Monthly symbols use YY and MON. Dated symbols use YY, a month code 1-9, O, N, or D, and DD. A physical stock is the product code. The short-option minimum is zero when the file's rate is zero. Extreme loss margin uses the contract file's percent. A futures calendar spread charges one third of that percent on the far-month quantity. Short-option notional is the SPAN underlying price. Option premium is the SPAN price times quantity. Payable premium is the positive net premium. Delivery margin is zero outside the four trading days before a stock expiry. The total is SPAN margin plus exposure margin, which is the combined total shown by a broker margin calculator. A short option's premium is included in that total. A book of only long options has a total of zero. Margin benefit is the amount by which a spread total is below the sum of the separate position totals, and it is already reflected in the total. Cross-margin benefit is zero. Reported amounts are rounded half away from zero to paise. This is not a reconciliation to NSE Clearing, ICCL, or a broker calculator.",
+    description = "Builds a canonical symbol from underlying, expiry, strike, and right, or accepts a symbol. The trade datetime selects the latest archived NSE SPAN file whose created time is at or before that moment, and the exposure, contract ELM, cash VaR, and contract master files for that date. An invalid book is rejected before those files are read. The total is SPAN margin plus exposure margin plus delivery margin. A short option premium is included. This does not replicate NSE Clearing or ICCL.",
     request_body = MarginRequest,
     responses(
         (status = 200, description = "SPAN scanning requirement", body = MarginResponse),
-        (status = 404, description = "No official SPAN file is archived for that date", body = crate::ErrorBody),
-        (status = 422, description = "The book or the newest SPAN file cannot be valued", body = crate::ErrorBody),
+        (status = 404, description = "No SPAN file published at or before that datetime is archived", body = crate::ErrorBody),
+        (status = 422, description = "The book or the as-of SPAN file cannot be valued, or a required file could not be downloaded", body = crate::ErrorBody),
         (status = 503, description = "The archive could not be read", body = crate::ErrorBody)
     )
 )]
@@ -102,60 +210,42 @@ pub async fn calculate_margin(
     State(state): State<AppState>,
     Json(request): Json<MarginRequest>,
 ) -> Response {
-    let exchange = match Exchange::parse(&request.exchange) {
-        Ok(exchange) => exchange,
-        Err(error) => {
-            return error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_request",
-                error.to_string(),
-            );
+    let (exchange, trading_datetime, positions) = match prepare_book(&request) {
+        Ok(book) => book,
+        Err(detail) => {
+            return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", detail);
         }
     };
-    if exchange != Exchange::Nse {
-        return error_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_request",
-            "SPAN margin is available for archived NSE files".to_owned(),
-        );
-    }
-    let trading_date = match NaiveDate::parse_from_str(&request.trading_date, "%Y-%m-%d") {
-        Ok(date) => date,
-        Err(_) => {
-            return error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_request",
-                "trading_date must be YYYY-MM-DD".to_owned(),
-            );
-        }
-    };
-    let mut positions = Vec::new();
-    for position in request.positions {
-        let quantity = match Decimal::from_str(position.quantity.trim()) {
-            Ok(quantity) => quantity,
-            Err(_) => {
-                return error_response(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "invalid_request",
-                    format!("quantity for {} must be a decimal string", position.symbol),
-                );
-            }
-        };
-        positions.push(MarginPosition {
-            symbol: position.symbol,
-            quantity,
-        });
-    }
-    match state
+    let stored = match state
         .store
         .span_margin(
             exchange,
             ClearingCorporation::Nscc,
-            trading_date,
+            trading_datetime,
             &positions,
         )
         .await
     {
+        Err(error) if missing_archive(&error) => {
+            if let (Some(config), AppStore::Postgres(store)) = (&state.config, &state.store)
+                && let Err(error) =
+                    ensure_nse_margin_files(config, store, trading_datetime.date()).await
+            {
+                return download_error(error);
+            }
+            state
+                .store
+                .span_margin(
+                    exchange,
+                    ClearingCorporation::Nscc,
+                    trading_datetime,
+                    &positions,
+                )
+                .await
+        }
+        other => other,
+    };
+    match stored {
         Ok(stored) => {
             let quote = stored.quote;
             (
@@ -165,6 +255,8 @@ pub async fn calculate_margin(
                     method: "nse-span-xml-4.00",
                     currency: quote.currency,
                     trading_date: stored.trading_date.to_string(),
+                    trading_datetime: ist_stamp(stored.trading_datetime),
+                    span_created: ist_stamp(stored.span_created),
                     dataset_id: stored.dataset_id.to_string(),
                     snapshot_class: stored.snapshot_class,
                     intraday_sequence: stored.intraday_sequence,
@@ -186,6 +278,7 @@ pub async fn calculate_margin(
                         .into_iter()
                         .map(|line| MarginLineBody {
                             symbol: line.symbol,
+                            canonical: line.canonical,
                             instrument: line.instrument.to_owned(),
                             product: line.product,
                             expiry: line.expiry.map(|expiry| expiry.to_string()),
@@ -198,6 +291,7 @@ pub async fn calculate_margin(
                             elm_percent: money(line.elm_percent),
                             premium: line.premium.to_string(),
                             total_margin: money(line.total_margin),
+                            lot_size: line.lot_size,
                             worst_scan_points: line.worst_scan_points,
                         })
                         .collect(),
@@ -216,6 +310,133 @@ pub async fn calculate_margin(
             StatusCode::SERVICE_UNAVAILABLE,
             "database_unavailable",
             error.to_string(),
+        ),
+    }
+}
+
+fn missing_archive(error: &DataError) -> bool {
+    match error {
+        DataError::MarginNotFound { .. } => true,
+        DataError::MarginRejected { detail } => {
+            detail.contains("no exposure file is archived")
+                || detail.contains("no contract ELM file is archived")
+                || detail.contains("capital-market VaR rate is not in the archived files")
+                || detail.contains("no contract master is archived")
+        }
+        _ => false,
+    }
+}
+
+#[derive(Deserialize, ToSchema)]
+#[schema(
+    description = "Exchange, underlying, expiry, strike, and right. Right is FUT, C, P, CE, PE, or EQ. A future has no strike. An option needs a positive strike. EQ is a physical stock."
+)]
+pub struct CanonicalInstrumentRequest {
+    #[schema(example = "NSE")]
+    exchange: String,
+    #[schema(example = "NIFTY")]
+    underlying: String,
+    #[schema(example = "2026-11-23")]
+    #[serde(default)]
+    expiry: Option<String>,
+    #[schema(example = "26000")]
+    #[serde(default)]
+    strike: Option<String>,
+    #[schema(example = "FUT")]
+    right: String,
+}
+
+#[derive(Serialize, ToSchema)]
+#[schema(
+    description = "Canonical instrument. A future is NSE:UNDERLYING:YYYY-MM-DD:FUT. An option is NSE:UNDERLYING:YYYY-MM-DD:STRIKE:CE or PE. A stock is NSE:UNDERLYING:EQ."
+)]
+pub struct CanonicalInstrumentResponse {
+    canonical: String,
+    exchange: String,
+    underlying: String,
+    expiry: Option<String>,
+    strike: Option<String>,
+    right: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/instruments/canonical",
+    tag = "instruments",
+    operation_id = "canonical_instrument",
+    summary = "Canonical instrument symbol",
+    description = "Builds NSE:UNDERLYING:YYYY-MM-DD:FUT, NSE:UNDERLYING:YYYY-MM-DD:STRIKE:CE, NSE:UNDERLYING:YYYY-MM-DD:STRIKE:PE, or NSE:UNDERLYING:EQ from the exchange, underlying, expiry, strike, and right. It does not read an archived file and does not return a margin.",
+    request_body = CanonicalInstrumentRequest,
+    responses(
+        (status = 200, description = "Canonical instrument", body = CanonicalInstrumentResponse),
+        (status = 422, description = "The instrument fields cannot form a canonical symbol", body = crate::ErrorBody)
+    )
+)]
+pub async fn canonical_instrument(Json(request): Json<CanonicalInstrumentRequest>) -> Response {
+    let exchange = match Exchange::parse(request.exchange.trim()) {
+        Ok(exchange) => exchange,
+        Err(error) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request",
+                error.to_string(),
+            );
+        }
+    };
+    let canonical = match canonical_contract_symbol(
+        exchange.code(),
+        &request.underlying,
+        filled(&request.expiry),
+        filled(&request.strike),
+        &request.right,
+    ) {
+        Ok(canonical) => canonical,
+        Err(detail) => {
+            return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", detail);
+        }
+    };
+    Json(instrument_response(canonical)).into_response()
+}
+
+fn instrument_response(canonical: String) -> CanonicalInstrumentResponse {
+    let parts: Vec<&str> = canonical.split(':').collect();
+    let (expiry, strike, right) = match parts.as_slice() {
+        [_, _, "EQ"] => (None, None, "EQ"),
+        [_, _, expiry, "FUT"] => (Some((*expiry).to_owned()), None, "FUT"),
+        [_, _, expiry, strike, right] => (
+            Some((*expiry).to_owned()),
+            Some((*strike).to_owned()),
+            *right,
+        ),
+        _ => (None, None, ""),
+    };
+    CanonicalInstrumentResponse {
+        exchange: parts.first().unwrap_or(&"").to_string(),
+        underlying: parts.get(1).unwrap_or(&"").to_string(),
+        expiry,
+        strike,
+        right: right.to_owned(),
+        canonical,
+    }
+}
+
+fn download_error(error: DataError) -> Response {
+    match error {
+        DataError::MarginNotFound { detail } => {
+            error_response(StatusCode::NOT_FOUND, "span_file_not_found", detail)
+        }
+        DataError::MarginRejected { detail } => {
+            error_response(StatusCode::UNPROCESSABLE_ENTITY, "margin_rejected", detail)
+        }
+        DataError::Database { detail } => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unavailable",
+            detail,
+        ),
+        other => error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "download_failed",
+            other.to_string(),
         ),
     }
 }

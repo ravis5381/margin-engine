@@ -200,7 +200,7 @@ fn parse_app(contents: &str) -> Result<ParsedApp, DataError> {
         request_timeout: Duration::from_secs(checked_range(
             raw.server.request_timeout_secs,
             1,
-            120,
+            300,
             "request timeout",
         )?),
         max_concurrency: checked_range(

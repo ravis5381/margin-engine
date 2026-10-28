@@ -47,6 +47,23 @@ The contract ELM file is kept when the gzip opens and begins with a
 comma-separated record. The margin quote reads its extreme-loss percent.
 `parser_status` on the archive row stays `not_implemented`.
 
+The F&O contract master is `NSE_FO_contract_DDMMYYYY.csv.gz` from
+`nsearchives.nseindia.com/content/fo/`. NSE circular NSE/MSD/60315 names that
+file. Expiry is seconds since 1980-01-01 at 14:30:00 UTC. Strike is stored in paise. `MinLot`
+matches `NewBrdLotQty` and is the lot size. A row with `DelFlg` other than `N`
+is skipped. The quote reports the lot size and does not multiply quantity by
+it. This layout was observed in `NSE_FO_contract_28102026.csv.gz`.
+
+The cash-market VaR file is `C_VAR1_DDMMYYYY_N.DAT` from
+`nsearchives.nseindia.com/archives/nsccl/var/`. The margin route downloads the
+newest published batch, from 6 down to 1, when that date has no archived VaR
+file. When a `cash_var_dat` row is archived, the quote reads the EQ
+series daily margin rate, the last field of each detail record. The control
+record is type `10` with the date `DDMMYYYY` and the detail count. A detail
+record is type `20`: symbol, series, ISIN, security VaR, filler, VaR margin,
+extreme loss rate, ad hoc margin, and the daily margin rate. This layout was
+observed in `C_VAR1_28102026_6.DAT`. Delivery margin uses that daily rate.
+
 A container mismatch is stored as a rejected row and the command fails. The
 original bytes are still the archived body. A non-file response, including an
 HTTP 404 page, is not archived.

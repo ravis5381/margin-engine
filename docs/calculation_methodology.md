@@ -23,16 +23,33 @@ rejected. Positions on different exchanges, or cleared by different
 corporations, cannot share one calculation scope. Lot size is not applied as a
 hidden conversion.
 
-`POST /api/v1/margin/calculate` reads futures, option, and physical-stock risk
-arrays from the newest archived NSE SPAN file for the requested date, and it
-reads the exposure file archived for that same date. A risk-array loss is
+`POST /api/v1/margin/calculate` takes a trade datetime. A time without an
+offset is India Standard Time, the same clock as the SPAN `<created>` value.
+The quote uses the latest archived NSE SPAN snapshot whose created time is at
+or before that moment, and it reads the exposure, contract ELM, cash VaR, and
+contract master files for that calendar date. A datetime before the first
+published snapshot of the day is rejected. Futures, option, and physical-stock
+risk arrays come from that SPAN file. A risk-array loss is
 positive for a long unit. Scanning risk is the greatest scenario loss, and it
 is zero when every scenario is a gain or the array is zero. Quantity is in
 units. Monthly symbols are `PRODUCTYYMMMFUT` and `PRODUCTYYMMMSTRIKECE` or
 `PE`. Dated symbols are `PRODUCTYYMDDFUT` and `PRODUCTYYMDDSTRIKECE` or `PE`,
 with month codes `1`–`9`, `O`, `N`, and `D`. A physical stock is the product
-code. A monthly symbol that matches more than one expiry is rejected unless
-one futures expiry in that month identifies the monthly option. Offsetting
+code. The contract-wise ELM file identifies the contract. Each returned
+line includes a canonical symbol built from the exchange, underlying, expiry,
+and right: `NSE:PRODUCT:YYYY-MM-DD:FUT`, `NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE`,
+`NSE:PRODUCT:YYYY-MM-DD:STRIKE:PE`, or `NSE:PRODUCT:EQ`. A request may send
+those parts as `underlying`, `expiry`, `strike`, and `right` (`FUT`, `C`, `P`,
+`CE`, `PE`, or `EQ`) and the route builds that symbol before the SPAN match.
+A position sends either that symbol or those fields. An empty book, a zero
+quantity, a repeated symbol, a non-positive option strike, and a position that
+sends both are rejected before the archive is read.
+A symbol that matches more than one row is rejected, and the error lists those
+canonical symbols. The same symbol may be sent in place of a market symbol.
+When the contract
+file is not loaded, a monthly symbol that matches more than one expiry is
+rejected unless one futures expiry in that month identifies the monthly
+option. Offsetting
 expiries add the flat calendar-spread charge published in the SPAN file. An
 index contract expiring on the trade date is scanned on its own and is not
 part of that spread. The short-option minimum is zero when the SPAN file's
@@ -53,16 +70,26 @@ case apply, the quote is rejected.
 
 Option premium is `quantity * SPAN option price`. A short option's premium is
 negative. Payable premium is the positive net premium of the book. Delivery
-margin is zero for an index and for a stock derivative whose expiry is more
-than four weekdays away. Inside that window the quote is rejected because the
-capital-market VaR rate is not archived. The count uses weekdays and has no
-holiday calendar. Cross-margin benefit is zero. Index-constituent cross
-margin is left out. SPAN margin is scanning risk plus the spread charge plus
-the short-option minimum. The reported total is that SPAN margin plus exposure
-margin. A short option's premium is included in the total. A book of only long
-options has a total of zero. Margin benefit is the amount by which a spread
-total is below the sum of the separate position totals, and that reduction is
-already in the total.
+margin applies to a stock derivative from four weekdays before expiry through
+the expiry day. The quantity is the net shares that expiry would deliver:
+futures and in-the-money options in that expiry are signed by whether they
+receive or deliver the stock, and out-of-the-money options contribute nothing.
+In-the-money uses the SPAN underlying price. The charge is that quantity times
+the underlying price times the EQ daily margin rate in the archived
+cash-market VaR file, times 10 percent on the fourth weekday before expiry,
+25 percent on the third, 45 percent on the second, 70 percent on the weekday
+before expiry, and 100 percent on the expiry day. An index and a position
+outside that window are zero. The count uses weekdays and has no holiday
+calendar. Mark-to-market is not a rate in the VaR file, so it is not added.
+If the window applies and no VaR file is archived, the quote is rejected.
+Cross-margin benefit is zero. Index-constituent cross margin is left out.
+SPAN margin is scanning risk plus the spread charge plus the short-option
+minimum. The reported total is that SPAN margin plus exposure margin plus
+delivery margin. A short option's premium is included in the total. A book of
+only long options has a total equal to its delivery margin. Margin benefit is
+the amount by which a spread total is below the sum of the separate position
+totals, measured before delivery margin, and that reduction is already in the
+total.
 Each reported amount is rounded half away from zero to paise. No NSE rounding
 circular was found; the rounding unit is the INR minor unit.
 
@@ -70,10 +97,9 @@ circular was found; the rounding unit is the INR minor unit.
 
 The diagnostic still reads arrays supplied by the caller and is not the margin
 route. A configuration flag set to permit a cross-exchange offset does not
-create a benefit. Delivery margin inside the four weekdays before a stock
-expiry is not calculated, because the capital-market VaR rate is not in the
-archived files. Index-constituent cross margin is left out, so the
-cross-margin benefit is zero.
+create a benefit. Index-constituent cross margin is left out, so the
+cross-margin benefit is zero. A cash-market VaR file that is not archived
+leaves delivery margin inside the expiry window uncalculated.
 
 Missing risk arrays, mismatched scenario order, mismatched quantity units, and
 unusable datasets produce errors. The engine does not substitute an older file

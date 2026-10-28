@@ -1,7 +1,7 @@
 [server]
 bind = "127.0.0.1:8080"
 request_body_limit_bytes = 1048576
-request_timeout_secs = 30
+request_timeout_secs = 180
 max_concurrency = 64
 
 [database]

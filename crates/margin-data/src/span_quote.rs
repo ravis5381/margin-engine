@@ -21,8 +21,8 @@ const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
 const UNCOMPRESSED_LIMIT: u64 = 104_857_600;
-const NOTE: &str = "SPAN scanning risk from the archived XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. Calendar spreads add the flat charge from the SPAN file and, for futures, extreme loss margin on one third of the far-month quantity. An index spread that includes a contract expiring on the trade date is not offset. Reported amounts are rounded half away from zero to paise. Delivery margin is zero outside the four trading days before a stock expiry. The total is SPAN margin plus exposure margin. Margin benefit is the amount by which that total is below the sum of the separate position totals. Cross-margin benefit is zero.";
-const NOTE_SHORT_OPTION: &str = "SPAN scanning risk from the archived XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. The short-option minimum rate in the SPAN file is zero. A short option's extreme loss margin uses the contract file's percent when that file is loaded, and otherwise the published index or exposure-file percent. Notional is the SPAN underlying price. The total is SPAN margin plus exposure margin, and the short option premium is included in that total. A book of only long options has a total of zero. Margin benefit is the amount by which that total is below the sum of the separate position totals. Cross-margin benefit is zero.";
+const NOTE: &str = "SPAN scanning risk from the archived XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. Calendar spreads add the flat charge from the SPAN file and, for futures, extreme loss margin on one third of the far-month quantity. An index spread that includes a contract expiring on the trade date is not offset. Reported amounts are rounded half away from zero to paise. Delivery margin on a stock derivative is 10, 25, 45, or 70 percent of the archived cash-market daily margin rate from four trading days before expiry through the day before expiry, and the full rate on the expiry day. The quantity is the net shares that expiry would deliver. It is zero outside that window and for an index. The total is SPAN margin plus exposure margin plus delivery margin. Margin benefit compares the separate position totals with the total before delivery margin. Cross-margin benefit is zero.";
+const NOTE_SHORT_OPTION: &str = "SPAN scanning risk from the archived XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. The short-option minimum rate in the SPAN file is zero. A short option's extreme loss margin uses the contract file's percent when that file is loaded, and otherwise the published index or exposure-file percent. Notional is the SPAN underlying price. Delivery margin on a stock derivative is 10, 25, 45, or 70 percent of the archived cash-market daily margin rate from four trading days before expiry through the day before expiry, and the full rate on the expiry day. The quantity is the net shares that expiry would deliver. The total is SPAN margin plus exposure margin plus delivery margin, and the short option premium is included in that total. A book of only long options has a total equal to its delivery margin. Margin benefit compares the separate position totals with the total before delivery margin. Cross-margin benefit is zero.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarginPosition {
@@ -33,6 +33,7 @@ pub struct MarginPosition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarginLine {
     pub symbol: String,
+    pub canonical: String,
     pub instrument: &'static str,
     pub product: String,
     pub expiry: Option<NaiveDate>,
@@ -45,6 +46,7 @@ pub struct MarginLine {
     pub elm_percent: Decimal,
     pub premium: Decimal,
     pub total_margin: Decimal,
+    pub lot_size: Option<u32>,
     pub worst_scan_points: Vec<u32>,
 }
 
@@ -64,6 +66,16 @@ pub struct SpanMarginQuote {
     pub total_margin: Decimal,
     pub lines: Vec<MarginLine>,
     pub note: &'static str,
+}
+
+impl SpanMarginQuote {
+    pub fn apply_lot_sizes(&mut self, master: &crate::ContractMaster) -> Result<(), String> {
+        for line in &mut self.lines {
+            line.lot_size =
+                master.lot_for(line.instrument, &line.product, line.expiry, line.strike)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -95,6 +107,7 @@ pub fn quote_span_zip(
     positions: &[MarginPosition],
     exposure: &ExposureRates,
     contracts: &ContractElmRates,
+    cash: &CashMarginRates,
 ) -> Result<SpanMarginQuote, String> {
     let entries = extract_zip_to_memory(bytes, ZipLimits::conservative(UNCOMPRESSED_LIMIT))
         .map_err(|error| error.to_string())?;
@@ -107,6 +120,7 @@ pub fn quote_span_zip(
         positions,
         exposure,
         contracts,
+        cash,
     )
 }
 
@@ -116,8 +130,10 @@ pub fn quote_span_xml(
     positions: &[MarginPosition],
     exposure: &ExposureRates,
     contracts: &ContractElmRates,
+    cash: &CashMarginRates,
 ) -> Result<SpanMarginQuote, String> {
     let specs = parse_positions(positions)?;
+    let specs = contracts.identify(positions, specs)?;
     let book = extract_contracts(bytes, trading_date, &specs)?;
     let requested = resolve_positions(positions, &specs, &book)?;
     price_book(
@@ -127,7 +143,73 @@ pub fn quote_span_xml(
         trading_date,
         exposure,
         contracts,
+        cash,
     )
+}
+
+pub fn check_margin_positions(positions: &[MarginPosition]) -> Result<(), String> {
+    parse_positions(positions).map(|_| ())
+}
+
+pub fn canonical_contract_symbol(
+    exchange_code: &str,
+    underlying: &str,
+    expiry: Option<&str>,
+    strike_text: Option<&str>,
+    right: &str,
+) -> Result<String, String> {
+    if exchange_code != "NSE" {
+        return Err("SPAN margin symbols use the NSE exchange".to_owned());
+    }
+    let product = underlying.trim().to_ascii_uppercase();
+    if !ascii_product(&product) {
+        return Err("underlying must be the product code".to_owned());
+    }
+    let right = right.trim().to_ascii_uppercase();
+    match right.as_str() {
+        "FUT" => {
+            if strike_text.is_some_and(|strike| !strike.trim().is_empty()) {
+                return Err("a future has no strike".to_owned());
+            }
+            let expiry = require_expiry(expiry)?;
+            Ok(format!("NSE:{product}:{expiry}:FUT"))
+        }
+        "EQ" => {
+            if expiry.is_some_and(|expiry| !expiry.trim().is_empty())
+                || strike_text.is_some_and(|strike| !strike.trim().is_empty())
+            {
+                return Err("a physical stock has no expiry or strike".to_owned());
+            }
+            Ok(format!("NSE:{product}:EQ"))
+        }
+        "C" | "CE" | "P" | "PE" => {
+            let expiry = require_expiry(expiry)?;
+            let strike = strike_text
+                .map(str::trim)
+                .filter(|strike| !strike.is_empty())
+                .ok_or_else(|| "an option needs a strike".to_owned())?;
+            let strike = Decimal::from_str(strike)
+                .map_err(|_| "strike must be a decimal string".to_owned())?;
+            if strike <= Decimal::ZERO {
+                return Err("strike must be positive".to_owned());
+            }
+            let side = if right.starts_with('C') { "CE" } else { "PE" };
+            Ok(format!(
+                "NSE:{product}:{expiry}:{}:{side}",
+                strike.normalize()
+            ))
+        }
+        _ => Err("right must be FUT, C, P, CE, PE, or EQ".to_owned()),
+    }
+}
+
+fn require_expiry(expiry: Option<&str>) -> Result<NaiveDate, String> {
+    let expiry = expiry
+        .map(str::trim)
+        .filter(|expiry| !expiry.is_empty())
+        .ok_or_else(|| "expiry must be YYYY-MM-DD".to_owned())?;
+    NaiveDate::parse_from_str(expiry, "%Y-%m-%d")
+        .map_err(|_| "expiry must be YYYY-MM-DD".to_owned())
 }
 
 fn parse_positions(positions: &[MarginPosition]) -> Result<Vec<SymbolSpec>, String> {
@@ -157,11 +239,25 @@ fn resolve_positions<'a>(
     book: &'a Book,
 ) -> Result<Vec<Requested<'a>>, String> {
     let mut requested = Vec::with_capacity(positions.len());
+    let mut seen = BTreeSet::new();
     for (position, spec) in positions.iter().zip(specs.iter()) {
+        let contract = select_contract(&position.symbol, spec, &book.contracts)?;
+        let key = (
+            contract.kind,
+            contract.product.clone(),
+            contract.expiry,
+            contract.strike,
+        );
+        if !seen.insert(key) {
+            return Err(format!(
+                "{} selects the same contract as another position",
+                position.symbol
+            ));
+        }
         requested.push(Requested {
             symbol: position.symbol.clone(),
             quantity: position.quantity,
-            contract: select_contract(&position.symbol, spec, &book.contracts)?,
+            contract,
         });
     }
     Ok(requested)
@@ -174,6 +270,7 @@ fn price_book(
     trading_date: NaiveDate,
     exposure: &ExposureRates,
     contracts: &ContractElmRates,
+    cash: &CashMarginRates,
 ) -> Result<SpanMarginQuote, String> {
     let mut by_product: BTreeMap<&str, Vec<&Requested<'_>>> = BTreeMap::new();
     for position in requested {
@@ -279,7 +376,7 @@ fn price_book(
         spread_charge = spread_charge
             .checked_add(formed.charge)
             .ok_or_else(|| format!("SPAN spread charge for {product} overflowed"))?;
-        for position in group {
+        for position in &group {
             let own: Vec<Decimal> = position
                 .contract
                 .values
@@ -308,16 +405,12 @@ fn price_book(
                 position.quantity,
                 position.contract.settlement_price,
             )?;
-            let line_delivery = position_delivery(position, exposure, trading_date)?;
             extreme_loss_margin = extreme_loss_margin
                 .checked_add(charge.amount)
                 .ok_or_else(|| format!("extreme loss margin for {product} overflowed"))?;
             premium = premium
                 .checked_add(line_premium)
                 .ok_or_else(|| format!("option premium for {product} overflowed"))?;
-            delivery_margin = delivery_margin
-                .checked_add(line_delivery)
-                .ok_or_else(|| format!("delivery margin for {product} overflowed"))?;
             let standalone_elm = if position.contract.kind == ContractKind::Future {
                 apply_percent(
                     position.contract.settlement_price,
@@ -346,6 +439,7 @@ fn price_book(
             };
             lines.push(MarginLine {
                 symbol: position.symbol.clone(),
+                canonical: canonical_symbol(position.contract),
                 instrument: position.contract.kind.label(),
                 product: product.to_owned(),
                 expiry: position.contract.expiry,
@@ -358,9 +452,21 @@ fn price_book(
                 elm_percent: charge.percent,
                 premium: line_premium,
                 total_margin: standalone,
+                lot_size: None,
                 worst_scan_points: own_points,
             });
         }
+        let product_delivery = product_delivery(
+            product,
+            &group,
+            book.underlyings.get(product).copied(),
+            trading_date,
+            index,
+            cash,
+        )?;
+        delivery_margin = delivery_margin
+            .checked_add(product_delivery)
+            .ok_or_else(|| format!("delivery margin for {product} overflowed"))?;
     }
     let premium_margin = if premium.is_sign_negative() {
         Decimal::ZERO
@@ -391,7 +497,7 @@ fn price_book(
         .and_then(|amount| amount.checked_add(short_option_minimum))
         .ok_or_else(|| "SPAN margin overflowed".to_owned())?;
     let total_margin = if long_options_only {
-        Decimal::ZERO
+        delivery_margin
     } else {
         span_margin
             .checked_add(extreme_loss_margin)
@@ -427,8 +533,11 @@ fn price_book(
             total.checked_add(line.total_margin)
         })
         .ok_or_else(|| "position total overflowed".to_owned())?;
+    let before_delivery = total_margin
+        .checked_sub(delivery_margin)
+        .ok_or_else(|| "total margin overflowed".to_owned())?;
     let margin_benefit = gross_margin
-        .checked_sub(total_margin)
+        .checked_sub(before_delivery)
         .filter(|gap| gap.is_sign_positive())
         .unwrap_or(Decimal::ZERO);
     Ok(SpanMarginQuote {
@@ -527,6 +636,7 @@ enum SymbolSpec {
         year: i32,
         month: u32,
         day: Option<u32>,
+        instrument: Option<String>,
     },
     Option {
         product: String,
@@ -535,6 +645,7 @@ enum SymbolSpec {
         day: Option<u32>,
         strike: Decimal,
         call: bool,
+        instrument: Option<String>,
     },
     Stock {
         product: String,
@@ -545,6 +656,9 @@ fn parse_symbol(symbol: &str) -> Result<SymbolSpec, String> {
     let symbol = symbol.trim().to_ascii_uppercase();
     if symbol.is_empty() {
         return Err("a position symbol is empty".to_owned());
+    }
+    if symbol.contains(':') {
+        return parse_canonical(&symbol);
     }
     if let Some(body) = symbol.strip_suffix("FUT") {
         return parse_future(&symbol, body);
@@ -578,6 +692,7 @@ fn parse_future(symbol: &str, body: &str) -> Result<SymbolSpec, String> {
             year,
             month,
             day: None,
+            instrument: None,
         });
     }
     let (product, year, month, day) = dated_contract(symbol, body)?;
@@ -586,7 +701,119 @@ fn parse_future(symbol: &str, body: &str) -> Result<SymbolSpec, String> {
         year,
         month,
         day: Some(day),
+        instrument: None,
     })
+}
+
+fn parse_canonical(symbol: &str) -> Result<SymbolSpec, String> {
+    let parts: Vec<&str> = symbol.split(':').collect();
+    if parts.first() == Some(&"NSE") {
+        return parse_exchange_symbol(symbol, &parts);
+    }
+    let instrument = parts.first().copied().unwrap_or("");
+    match (instrument, parts.len()) {
+        ("EQ", 2) => {
+            if !ascii_product(parts[1]) {
+                return Err(format!("{symbol} is not a canonical stock symbol"));
+            }
+            Ok(SymbolSpec::Stock {
+                product: parts[1].to_owned(),
+            })
+        }
+        ("FUTIDX" | "FUTSTK", 3) => {
+            let (year, month, day) = canonical_date(symbol, parts[2])?;
+            if !ascii_product(parts[1]) {
+                return Err(format!("{symbol} is not a canonical futures symbol"));
+            }
+            Ok(SymbolSpec::Future {
+                product: parts[1].to_owned(),
+                year,
+                month,
+                day: Some(day),
+                instrument: Some(instrument.to_owned()),
+            })
+        }
+        ("OPTIDX" | "OPTSTK", 5) => {
+            let (year, month, day) = canonical_date(symbol, parts[2])?;
+            let call = match parts[4] {
+                "CE" => true,
+                "PE" => false,
+                _ => return Err(format!("{symbol} option type must be CE or PE")),
+            };
+            if !ascii_product(parts[1]) {
+                return Err(format!("{symbol} is not a canonical option symbol"));
+            }
+            Ok(SymbolSpec::Option {
+                product: parts[1].to_owned(),
+                year,
+                month,
+                day: Some(day),
+                strike: strike(symbol, parts[3])?,
+                call,
+                instrument: Some(instrument.to_owned()),
+            })
+        }
+        _ => Err(format!(
+            "{symbol} is not a canonical symbol. Use NSE:PRODUCT:YYYY-MM-DD:FUT, NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE, NSE:PRODUCT:YYYY-MM-DD:STRIKE:PE, or NSE:PRODUCT:EQ"
+        )),
+    }
+}
+
+fn parse_exchange_symbol(symbol: &str, parts: &[&str]) -> Result<SymbolSpec, String> {
+    match parts {
+        ["NSE", product, "EQ"] => {
+            if !ascii_product(product) {
+                return Err(format!("{symbol} is not a canonical stock symbol"));
+            }
+            Ok(SymbolSpec::Stock {
+                product: (*product).to_owned(),
+            })
+        }
+        ["NSE", product, date, "FUT"] => {
+            let (year, month, day) = canonical_date(symbol, date)?;
+            if !ascii_product(product) {
+                return Err(format!("{symbol} is not a canonical futures symbol"));
+            }
+            Ok(SymbolSpec::Future {
+                product: (*product).to_owned(),
+                year,
+                month,
+                day: Some(day),
+                instrument: None,
+            })
+        }
+        ["NSE", product, date, strike_text, right] => {
+            let call = match *right {
+                "C" | "CE" => true,
+                "P" | "PE" => false,
+                _ => {
+                    return Err(format!("{symbol} option type must be C, P, CE, or PE"));
+                }
+            };
+            let (year, month, day) = canonical_date(symbol, date)?;
+            if !ascii_product(product) {
+                return Err(format!("{symbol} is not a canonical option symbol"));
+            }
+            Ok(SymbolSpec::Option {
+                product: (*product).to_owned(),
+                year,
+                month,
+                day: Some(day),
+                strike: strike(symbol, strike_text)?,
+                call,
+                instrument: None,
+            })
+        }
+        _ => Err(format!(
+            "{symbol} is not a canonical symbol. Use NSE:PRODUCT:YYYY-MM-DD:FUT, NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE, NSE:PRODUCT:YYYY-MM-DD:STRIKE:PE, or NSE:PRODUCT:EQ"
+        )),
+    }
+}
+
+fn canonical_date(symbol: &str, text: &str) -> Result<(i32, u32, u32), String> {
+    let date = NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .map_err(|_| format!("{symbol} date must be YYYY-MM-DD"))?;
+    Ok((date.year(), date.month(), date.day()))
 }
 
 fn parse_option(symbol: &str, body: &str, call: bool) -> Result<SymbolSpec, String> {
@@ -599,6 +826,7 @@ fn parse_option(symbol: &str, body: &str, call: bool) -> Result<SymbolSpec, Stri
             day: None,
             strike,
             call,
+            instrument: None,
         });
     }
     let Some((product, year, month, day, strike)) = weekly_option_splits(body).into_iter().next()
@@ -612,6 +840,7 @@ fn parse_option(symbol: &str, body: &str, call: bool) -> Result<SymbolSpec, Stri
         day: Some(day),
         strike,
         call,
+        instrument: None,
     })
 }
 
@@ -808,6 +1037,7 @@ fn select_contract<'a>(
             year,
             month,
             day,
+            instrument: _,
         } => {
             let matches = contracts
                 .iter()
@@ -843,6 +1073,7 @@ fn select_option<'a>(
         day,
         strike,
         call,
+        instrument: _,
     } = spec
     else {
         return Err(format!("{symbol} is not an option in the SPAN file"));
@@ -969,6 +1200,33 @@ fn option_choices(matches: &[&SpanContract]) -> String {
         .join(", ")
 }
 
+fn canonical_symbol(contract: &SpanContract) -> String {
+    let Some(expiry) = contract.expiry else {
+        return format!("NSE:{}:EQ", contract.product);
+    };
+    canonical_parts(&contract.product, expiry, contract.strike, contract.kind)
+}
+
+fn canonical_parts(
+    product: &str,
+    expiry: NaiveDate,
+    strike: Option<Decimal>,
+    kind: ContractKind,
+) -> String {
+    match kind {
+        ContractKind::Stock => format!("NSE:{product}:EQ"),
+        ContractKind::Future => format!("NSE:{product}:{expiry}:FUT"),
+        ContractKind::Call => format!(
+            "NSE:{product}:{expiry}:{}:CE",
+            strike.unwrap_or(Decimal::ZERO).normalize()
+        ),
+        ContractKind::Put => format!(
+            "NSE:{product}:{expiry}:{}:PE",
+            strike.unwrap_or(Decimal::ZERO).normalize()
+        ),
+    }
+}
+
 fn dated_future(product: &str, expiry: NaiveDate) -> String {
     format!(
         "{product}{:02}{}{:02}FUT",
@@ -997,6 +1255,7 @@ impl SymbolSpec {
                 year,
                 month,
                 day,
+                instrument: _,
             } => name == product && expiry_matches(Some(expiry), *year, *month, *day),
             Self::Option {
                 product: name,
@@ -1018,6 +1277,7 @@ impl SymbolSpec {
                 day,
                 strike: needed,
                 call: needed_call,
+                instrument: _,
             } => {
                 name == product
                     && *needed_call == call
@@ -1886,6 +2146,16 @@ struct ExtremeLoss {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContractElmRates {
     rows: BTreeMap<(String, NaiveDate, ContractKind, Option<Decimal>), Decimal>,
+    listed: Vec<ListedContract>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListedContract {
+    instrument: String,
+    product: String,
+    expiry: NaiveDate,
+    strike: Option<Decimal>,
+    kind: ContractKind,
 }
 
 impl ContractElmRates {
@@ -1893,6 +2163,7 @@ impl ContractElmRates {
         let text =
             std::str::from_utf8(bytes).map_err(|_| "contract ELM file is not UTF-8".to_owned())?;
         let mut rows = BTreeMap::new();
+        let mut listed = Vec::new();
         for (index, line) in text.lines().enumerate() {
             let row = index + 1;
             if line.trim().is_empty() {
@@ -1904,7 +2175,8 @@ impl ContractElmRates {
                     "contract ELM file row {row} does not have 7 fields"
                 ));
             }
-            let kind = contract_kind(fields[0].trim(), fields[4].trim(), row)?;
+            let instrument = fields[0].trim().to_owned();
+            let kind = contract_kind(&instrument, fields[4].trim(), row)?;
             let product = fields[1].trim();
             if product.is_empty() {
                 return Err(format!("contract ELM file row {row} has no symbol"));
@@ -1924,19 +2196,27 @@ impl ContractElmRates {
                 return Err(format!("contract ELM file row {row} percent is negative"));
             }
             let key = (product.to_owned(), expiry, kind, strike);
-            if let Some(existing) = rows.get(&key)
-                && existing != &percent
-            {
-                return Err(format!(
-                    "contract ELM file repeats {product} {expiry} with different percents"
-                ));
+            if let Some(existing) = rows.get(&key) {
+                if existing != &percent {
+                    return Err(format!(
+                        "contract ELM file repeats {product} {expiry} with different percents"
+                    ));
+                }
+            } else {
+                listed.push(ListedContract {
+                    instrument,
+                    product: product.to_owned(),
+                    expiry,
+                    strike,
+                    kind,
+                });
             }
             rows.insert(key, percent);
         }
         if rows.is_empty() {
             return Err("contract ELM file has no rows".to_owned());
         }
-        Ok(Self { rows })
+        Ok(Self { rows, listed })
     }
 
     pub fn parse_gzip(bytes: &[u8]) -> Result<Self, String> {
@@ -1967,6 +2247,239 @@ impl ContractElmRates {
                     "contract ELM file has no rate for {product} {kind:?} {expiry} strike {strike:?}"
                 )
             })
+    }
+
+    fn identify(
+        &self,
+        positions: &[MarginPosition],
+        specs: Vec<SymbolSpec>,
+    ) -> Result<Vec<SymbolSpec>, String> {
+        if self.listed.is_empty() {
+            return Ok(specs);
+        }
+        let mut identified = Vec::with_capacity(specs.len());
+        for (position, spec) in positions.iter().zip(specs) {
+            identified.push(self.identify_one(&position.symbol, spec)?);
+        }
+        Ok(identified)
+    }
+
+    fn identify_one(&self, symbol: &str, spec: SymbolSpec) -> Result<SymbolSpec, String> {
+        if matches!(spec, SymbolSpec::Stock { .. }) {
+            return Ok(spec);
+        }
+        let matches = self
+            .listed
+            .iter()
+            .filter(|row| row.matches(&spec))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [row] => Ok(row.pin(spec)),
+            [] => Err(format!("{symbol} is not in the contract file")),
+            many => {
+                let mut names = many.iter().map(|row| row.canonical()).collect::<Vec<_>>();
+                names.sort();
+                names.dedup();
+                Err(format!(
+                    "{symbol} matches more than one contract. Use a canonical symbol: {}",
+                    names.join(", ")
+                ))
+            }
+        }
+    }
+}
+
+impl ListedContract {
+    fn matches(&self, spec: &SymbolSpec) -> bool {
+        match spec {
+            SymbolSpec::Future {
+                product,
+                year,
+                month,
+                day,
+                instrument,
+            } => {
+                self.kind == ContractKind::Future
+                    && self.product == *product
+                    && expiry_matches(Some(self.expiry), *year, *month, *day)
+                    && instrument
+                        .as_ref()
+                        .is_none_or(|code| code == &self.instrument)
+            }
+            SymbolSpec::Option {
+                product,
+                year,
+                month,
+                day,
+                strike,
+                call,
+                instrument,
+            } => {
+                let kind = if *call {
+                    ContractKind::Call
+                } else {
+                    ContractKind::Put
+                };
+                self.kind == kind
+                    && self.product == *product
+                    && self.strike == Some(*strike)
+                    && expiry_matches(Some(self.expiry), *year, *month, *day)
+                    && instrument
+                        .as_ref()
+                        .is_none_or(|code| code == &self.instrument)
+            }
+            SymbolSpec::Stock { .. } => false,
+        }
+    }
+
+    fn pin(&self, spec: SymbolSpec) -> SymbolSpec {
+        match spec {
+            SymbolSpec::Future {
+                product,
+                year,
+                month,
+                ..
+            } => SymbolSpec::Future {
+                product,
+                year,
+                month,
+                day: Some(self.expiry.day()),
+                instrument: Some(self.instrument.clone()),
+            },
+            SymbolSpec::Option {
+                product,
+                year,
+                month,
+                strike,
+                call,
+                ..
+            } => SymbolSpec::Option {
+                product,
+                year,
+                month,
+                day: Some(self.expiry.day()),
+                strike,
+                call,
+                instrument: Some(self.instrument.clone()),
+            },
+            other => other,
+        }
+    }
+
+    fn canonical(&self) -> String {
+        canonical_parts(&self.product, self.expiry, self.strike, self.kind)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CashMarginRates {
+    rates: BTreeMap<String, Decimal>,
+}
+
+impl CashMarginRates {
+    pub fn parse(bytes: &[u8], trading_date: NaiveDate) -> Result<Self, String> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| "cash-market VaR file is not UTF-8".to_owned())?;
+        let expected_date = trading_date.format("%d%m%Y").to_string();
+        let mut declared: Option<usize> = None;
+        let mut details = 0usize;
+        let mut rates = BTreeMap::new();
+        for (index, raw) in text.lines().enumerate() {
+            let line = raw.trim().trim_end_matches('\r');
+            if line.is_empty() {
+                continue;
+            }
+            let row = index + 1;
+            let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+            match fields.first().copied() {
+                Some("10") if declared.is_none() => {
+                    if fields.len() != 5 {
+                        return Err(format!(
+                            "cash-market VaR file row {row} does not have 5 control fields"
+                        ));
+                    }
+                    if fields[1] != expected_date {
+                        return Err(format!(
+                            "cash-market VaR file date {} is not {trading_date}",
+                            fields[1]
+                        ));
+                    }
+                    declared = Some(fields[4].parse::<usize>().map_err(|_| {
+                        format!("cash-market VaR file row {row} record count is not a number")
+                    })?);
+                }
+                Some("10") => {
+                    return Err("cash-market VaR file has more than one control record".to_owned());
+                }
+                Some("20") => {
+                    if declared.is_none() {
+                        return Err(
+                            "cash-market VaR file detail record appears before the control record"
+                                .to_owned(),
+                        );
+                    }
+                    if fields.len() != 10 {
+                        return Err(format!(
+                            "cash-market VaR file row {row} does not have 10 fields"
+                        ));
+                    }
+                    details += 1;
+                    if fields[2] != "EQ" {
+                        continue;
+                    }
+                    let symbol = fields[1].to_ascii_uppercase();
+                    if symbol.is_empty() {
+                        return Err(format!("cash-market VaR file row {row} has no symbol"));
+                    }
+                    let percent = Decimal::from_str(fields[9]).map_err(|_| {
+                        format!("cash-market VaR file row {row} daily margin rate is not a decimal")
+                    })?;
+                    if percent.is_sign_negative() {
+                        return Err(format!(
+                            "cash-market VaR file row {row} daily margin rate is negative"
+                        ));
+                    }
+                    if let Some(existing) = rates.get(&symbol)
+                        && existing != &percent
+                    {
+                        return Err(format!(
+                            "cash-market VaR file repeats {symbol} EQ with different daily margin rates"
+                        ));
+                    }
+                    rates.insert(symbol, percent);
+                }
+                _ => {
+                    return Err(format!(
+                        "cash-market VaR file row {row} record type is not 10 or 20"
+                    ));
+                }
+            }
+        }
+        let Some(declared) = declared else {
+            return Err("cash-market VaR file has no control record".to_owned());
+        };
+        if declared != details {
+            return Err(format!(
+                "cash-market VaR file declares {declared} detail records and contains {details}"
+            ));
+        }
+        if rates.is_empty() {
+            return Err("cash-market VaR file has no EQ series".to_owned());
+        }
+        Ok(Self { rates })
+    }
+
+    fn daily_percent(&self, product: &str) -> Result<Decimal, String> {
+        if self.rates.is_empty() {
+            return Err(format!(
+                "delivery margin for {product} is inside the expiry window, and the capital-market VaR rate is not in the archived files"
+            ));
+        }
+        self.rates.get(product).copied().ok_or_else(|| {
+            format!(
+                "delivery margin for {product} has no EQ series rate in the archived cash-market VaR file"
+            )
+        })
     }
 }
 
@@ -2268,30 +2781,113 @@ fn future_extreme_loss(
     })
 }
 
-fn position_delivery(
-    position: &Requested<'_>,
-    exposure: &ExposureRates,
+fn product_delivery(
+    product: &str,
+    group: &[&Requested<'_>],
+    underlying: Option<Decimal>,
     trading_date: NaiveDate,
+    index: bool,
+    cash: &CashMarginRates,
 ) -> Result<Decimal, String> {
-    if position.contract.kind == ContractKind::Stock
-        || !exposure.contains_stock(&position.contract.product)
-    {
+    if index {
         return Ok(Decimal::ZERO);
     }
-    let Some(expiry) = position.contract.expiry else {
-        return Ok(Decimal::ZERO);
-    };
-    match weekdays_until(trading_date, expiry) {
-        Some(0) => Err(format!(
-            "delivery margin for {} is due on its expiry day, and the capital-market VaR rate is not in the archived files",
-            position.symbol
-        )),
-        Some(stage @ 1..=4) => Err(format!(
-            "delivery margin for {} is due {stage} trading days before expiry, and the capital-market VaR rate is not in the archived files",
-            position.symbol
-        )),
-        _ => Ok(Decimal::ZERO),
+    let mut buckets: BTreeMap<NaiveDate, (Decimal, Decimal)> = BTreeMap::new();
+    for position in group {
+        if position.contract.kind == ContractKind::Stock {
+            continue;
+        }
+        let Some(expiry) = position.contract.expiry else {
+            continue;
+        };
+        let Some(stage) = weekdays_until(trading_date, expiry) else {
+            continue;
+        };
+        let shares = deliverable_shares(position, underlying)?;
+        let entry = buckets
+            .entry(expiry)
+            .or_insert((Decimal::ZERO, delivery_stage_percent(stage)));
+        entry.0 = entry
+            .0
+            .checked_add(shares)
+            .ok_or_else(|| format!("delivery margin for {product} overflowed"))?;
     }
+    let mut total = Decimal::ZERO;
+    for (shares, stage_percent) in buckets.into_values() {
+        if shares.is_zero() {
+            continue;
+        }
+        let price = underlying
+            .filter(|price| price.is_sign_positive())
+            .ok_or_else(|| {
+                format!(
+                    "SPAN {product} has no underlying price, so delivery margin is not calculated"
+                )
+            })?;
+        let rate = cash.daily_percent(product)?;
+        let amount = shares
+            .abs()
+            .checked_mul(price)
+            .and_then(|notional| notional.checked_mul(rate))
+            .and_then(|scaled| scaled.checked_mul(stage_percent))
+            .and_then(|scaled| scaled.checked_div(Decimal::from(10_000)))
+            .ok_or_else(|| format!("delivery margin for {product} overflowed"))?;
+        total = total
+            .checked_add(amount)
+            .ok_or_else(|| format!("delivery margin for {product} overflowed"))?;
+    }
+    Ok(total)
+}
+
+fn deliverable_shares(
+    position: &Requested<'_>,
+    underlying: Option<Decimal>,
+) -> Result<Decimal, String> {
+    match position.contract.kind {
+        ContractKind::Stock => Ok(Decimal::ZERO),
+        ContractKind::Future => Ok(position.quantity),
+        ContractKind::Call | ContractKind::Put => {
+            let strike = position.contract.strike.ok_or_else(|| {
+                format!(
+                    "delivery margin for {} has no strike, so in-the-money status is not known",
+                    position.symbol
+                )
+            })?;
+            let price = underlying
+                .filter(|price| price.is_sign_positive())
+                .ok_or_else(|| {
+                    format!(
+                        "SPAN {} has no underlying price, so delivery margin is not calculated",
+                        position.contract.product
+                    )
+                })?;
+            let in_the_money = match position.contract.kind {
+                ContractKind::Call => strike < price,
+                ContractKind::Put => strike > price,
+                ContractKind::Future | ContractKind::Stock => false,
+            };
+            if !in_the_money {
+                return Ok(Decimal::ZERO);
+            }
+            if position.contract.kind == ContractKind::Call {
+                Ok(position.quantity)
+            } else {
+                Decimal::ZERO
+                    .checked_sub(position.quantity)
+                    .ok_or_else(|| format!("delivery margin for {} overflowed", position.symbol))
+            }
+        }
+    }
+}
+
+fn delivery_stage_percent(stage: u32) -> Decimal {
+    Decimal::from(match stage {
+        0 => 100,
+        1 => 70,
+        2 => 45,
+        3 => 25,
+        _ => 10,
+    })
 }
 
 fn weekdays_until(from: NaiveDate, until: NaiveDate) -> Option<u32> {
@@ -2485,7 +3081,10 @@ fn plus_months(date: NaiveDate, months: u32) -> Result<NaiveDate, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContractElmRates, ExposureRates, MarginPosition, SpanMarginQuote, quote_span_xml};
+    use super::{
+        CashMarginRates, ContractElmRates, ExposureRates, MarginPosition, SpanMarginQuote,
+        quote_span_xml,
+    };
     use chrono::NaiveDate;
     use rust_decimal::Decimal;
 
@@ -2519,6 +3118,7 @@ mod tests {
             positions,
             &exposure(),
             &ContractElmRates::default(),
+            &CashMarginRates::default(),
         )
     }
 
@@ -2775,6 +3375,7 @@ mod tests {
             &[position("RELIANCE26N26FUT", "-1")],
             &raised,
             &ContractElmRates::default(),
+            &CashMarginRates::default(),
         )
         .expect("additional");
         assert_eq!(future.lines[0].elm_percent, amount("18.5"));
@@ -2880,8 +3481,10 @@ mod tests {
             &[position("NIFTY26NOVFUT", "-65")],
             &exposure(),
             &rates,
+            &CashMarginRates::default(),
         )
         .expect("file rate");
+        assert_eq!(quote.lines[0].canonical, "NSE:NIFTY:2026-11-23:FUT");
         assert_eq!(quote.lines[0].elm_percent, amount("2.5"));
         assert_eq!(quote.extreme_loss_margin, amount("37062.35"));
         let missing = quote_span_xml(
@@ -2890,20 +3493,177 @@ mod tests {
             &[position("NIFTY26DECFUT", "1")],
             &exposure(),
             &rates,
+            &CashMarginRates::default(),
         )
         .expect_err("missing contract");
-        assert!(missing.contains("no rate"), "{missing}");
+        assert!(missing.contains("not in the contract file"), "{missing}");
     }
 
     #[test]
-    fn delivery_margin_is_zero_outside_the_window_and_rejected_inside_it() {
+    fn delivery_margin_uses_the_cash_rate_on_the_net_deliverable_shares() {
         let outside =
             value_book(book().as_bytes(), &[position("RELIANCE26N26FUT", "-1")]).expect("outside");
         assert_eq!(outside.delivery_margin, Decimal::ZERO);
         assert_eq!(outside.cross_margin_benefit, Decimal::ZERO);
         let inside = book().replace("<pe>20261126</pe>", "<pe>20261103</pe>");
-        let error = value_book(inside.as_bytes(), &[position("RELIANCE26N03FUT", "-1")])
+        let missing = value_book(inside.as_bytes(), &[position("RELIANCE26N03FUT", "-1")])
             .expect_err("inside window");
-        assert!(error.contains("capital-market VaR"), "{error}");
+        assert!(missing.contains("capital-market VaR"), "{missing}");
+
+        let cash = CashMarginRates::parse(
+            b"10,28102026,0.00,06,0000001\n20,RELIANCE,EQ,INE002A01018,8.55,0.00,9.00,3.50,0.00,12.50\n",
+            date(),
+        )
+        .expect("var");
+        let quote = quote_span_xml(
+            inside.as_bytes(),
+            date(),
+            &[position("RELIANCE26N03FUT", "-1")],
+            &exposure(),
+            &ContractElmRates::default(),
+            &cash,
+        )
+        .expect("delivery");
+        assert_eq!(quote.delivery_margin, amount("14.59"));
+        assert_eq!(quote.scanning_risk, amount("55.05"));
+        assert_eq!(quote.extreme_loss_margin, amount("41.02"));
+        assert_eq!(quote.total_margin, amount("110.66"));
+
+        let otm =
+            value_book(inside.as_bytes(), &[position("RELIANCE26N031400CE", "-2")]).expect("otm");
+        assert_eq!(otm.delivery_margin, Decimal::ZERO);
+
+        let offset = inside.replace("<o>C</o><k>1400</k>", "<o>P</o><k>1400</k>");
+        let netted = value_book(
+            offset.as_bytes(),
+            &[
+                position("RELIANCE26N03FUT", "1"),
+                position("RELIANCE26N031400PE", "1"),
+            ],
+        )
+        .expect("netted");
+        assert_eq!(netted.delivery_margin, Decimal::ZERO);
+
+        let expiry_day = book().replace("<pe>20261126</pe>", "<pe>20261028</pe>");
+        let expiry = quote_span_xml(
+            expiry_day.as_bytes(),
+            date(),
+            &[position("RELIANCE26O28FUT", "-1")],
+            &exposure(),
+            &ContractElmRates::default(),
+            &cash,
+        )
+        .expect("expiry day");
+        assert_eq!(expiry.delivery_margin, amount("145.86"));
+
+        let other = CashMarginRates::parse(
+            b"10,28102026,0.00,06,0000001\n20,HDFCBANK,EQ,INE040A01034,8.39,0.00,9.00,3.50,0.00,12.50\n",
+            date(),
+        )
+        .expect("other");
+        let absent = quote_span_xml(
+            inside.as_bytes(),
+            date(),
+            &[position("RELIANCE26N03FUT", "-1")],
+            &exposure(),
+            &ContractElmRates::default(),
+            &other,
+        )
+        .expect_err("missing symbol");
+        assert!(absent.contains("no EQ series"), "{absent}");
+    }
+
+    #[test]
+    fn the_contract_file_identifies_the_expiry_and_a_canonical_symbol_selects_one() {
+        let rates = ContractElmRates::parse_csv(
+            b"FUTSTK,RELIANCE,23-NOV-2026,-1,XX,0,3.5\nFUTSTK,RELIANCE,26-NOV-2026,-1,XX,0,3.5\nFUTIDX,NIFTY,23-NOV-2026,-1,XX,0,2\nOPTIDX,NIFTY,03-NOV-2026,26000,CE,0,3\n",
+        )
+        .expect("contracts");
+        let ambiguous = quote_span_xml(
+            book().as_bytes(),
+            date(),
+            &[position("RELIANCE26NOVFUT", "1")],
+            &exposure(),
+            &rates,
+            &CashMarginRates::default(),
+        )
+        .expect_err("two expiries");
+        assert!(
+            ambiguous.contains("NSE:RELIANCE:2026-11-23:FUT"),
+            "{ambiguous}"
+        );
+        assert!(
+            ambiguous.contains("NSE:RELIANCE:2026-11-26:FUT"),
+            "{ambiguous}"
+        );
+
+        let chosen = quote_span_xml(
+            book().as_bytes(),
+            date(),
+            &[position("NSE:RELIANCE:2026-11-26:FUT", "-1")],
+            &exposure(),
+            &rates,
+            &CashMarginRates::default(),
+        )
+        .expect("canonical");
+        assert_eq!(chosen.lines[0].canonical, "NSE:RELIANCE:2026-11-26:FUT");
+        assert_eq!(
+            chosen.lines[0].expiry,
+            Some(NaiveDate::from_ymd_opt(2026, 11, 26).expect("expiry"))
+        );
+
+        let only_far = ContractElmRates::parse_csv(b"FUTSTK,RELIANCE,26-NOV-2026,-1,XX,0,3.5\n")
+            .expect("one expiry");
+        let resolved = quote_span_xml(
+            book().as_bytes(),
+            date(),
+            &[position("RELIANCE26NOVFUT", "-1")],
+            &exposure(),
+            &only_far,
+            &CashMarginRates::default(),
+        )
+        .expect("identified");
+        assert_eq!(resolved.lines[0].canonical, "NSE:RELIANCE:2026-11-26:FUT");
+
+        let index =
+            value_book(document().as_bytes(), &[position("NIFTY26NOVFUT", "-65")]).expect("index");
+        assert_eq!(index.lines[0].canonical, "NSE:NIFTY:2026-11-23:FUT");
+        let stock = value_book(book().as_bytes(), &[position("RELIANCE", "5")]).expect("stock");
+        assert_eq!(stock.lines[0].canonical, "NSE:RELIANCE:EQ");
+        let call = quote_span_xml(
+            book().as_bytes(),
+            date(),
+            &[position("NSE:NIFTY:2026-11-03:26000:CE", "-1")],
+            &exposure(),
+            &rates,
+            &CashMarginRates::default(),
+        )
+        .expect("call");
+        assert_eq!(call.lines[0].canonical, "NSE:NIFTY:2026-11-03:26000:CE");
+
+        let wrong = quote_span_xml(
+            book().as_bytes(),
+            date(),
+            &[position("FUTIDX:RELIANCE:2026-11-26", "-1")],
+            &exposure(),
+            &rates,
+            &CashMarginRates::default(),
+        )
+        .expect_err("index prefix");
+        assert!(wrong.contains("not in the contract file"), "{wrong}");
+
+        let repeated = quote_span_xml(
+            book().as_bytes(),
+            date(),
+            &[
+                position("RELIANCE26N26FUT", "-1"),
+                position("NSE:RELIANCE:2026-11-26:FUT", "1"),
+            ],
+            &exposure(),
+            &rates,
+            &CashMarginRates::default(),
+        )
+        .expect_err("same contract");
+        assert!(repeated.contains("same contract"), "{repeated}");
     }
 }

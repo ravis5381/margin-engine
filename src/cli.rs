@@ -297,6 +297,7 @@ async fn serve(config: AppConfig, store: AppStore) -> Result<(), EngineError> {
     let address = config.bind;
     let state = AppState {
         store,
+        config: Some(config.clone()),
         body_limit: config.request_body_limit_bytes,
         request_timeout: config.request_timeout,
         max_concurrency: config.max_concurrency,

@@ -12,7 +12,8 @@ configuration authorizes no exchange and clearing-corporation pair.
 verified NSE reports, and stores original file bytes. A `.spn` member is parsed
 as XML-based SPAN 4.00. Scan points from a single rate are stored with the
 draft dataset. Risk-array amounts remain in the archived file. The margin quote
-reads the contract-wise ELM percent, applies the SPAN calendar-spread charge,
+reads the contract-wise ELM percent and an archived cash-market VaR rate for
+delivery margin, applies the SPAN calendar-spread charge,
 and rounds each reported amount half away from zero to paise. Domain addition
 does not round. There is no foreign-exchange conversion.
 
@@ -29,7 +30,8 @@ the amounts differ, including when it is inside a diagnostic tolerance.
 
 `margin-api` exposes liveness, readiness, data status, and dataset metadata.
 Swagger UI at `/swagger-ui` and the OpenAPI document at `/api/v1/openapi.json`
-describe those routes. Calculation and ingestion routes are not registered.
+describe those routes, including margin calculation. Ingestion and
+reconciliation routes are not registered.
 
 PostgreSQL is the system of record for archived bytes and published dataset
 versions. Publication is an insert. A published row can move only to

@@ -1,12 +1,14 @@
+use crate::ContractMaster;
 use crate::archive::{
     AuxiliaryArchiveRequest, IngestReceipt, SpanArchiveRequest, archive_auxiliary, archive_span,
     record_download_failure,
 };
-use crate::fetch::download_nse_report;
+use crate::fetch::{download_cash_var, download_contract_master, download_nse_report};
 use crate::nse_reports::{
     NSE_SOURCE_ID, NseReportKind, SPAN_FILE_FORMAT, check_contract_elm_gzip, check_exposure_csv,
     check_span_container, is_verified_reports_endpoint,
 };
+use crate::span_quote::CashMarginRates;
 use crate::{
     AppConfig, ConfiguredSource, DataError, PgStore, build_download_client, ensure_source_fetchable,
 };
@@ -47,10 +49,186 @@ pub async fn ingest_nse_report(
     kind: NseReportKind,
     trading_date: NaiveDate,
 ) -> Result<IngestReceipt, DataError> {
+    let client = build_download_client(&config.download)?;
+    ingest_with_client(config, store, &client, kind, trading_date).await
+}
+
+pub async fn ensure_nse_margin_files(
+    config: &AppConfig,
+    store: &PgStore,
+    trading_date: NaiveDate,
+) -> Result<(), DataError> {
     let source = verified_nse_source(config)?;
     let client = build_download_client(&config.download)?;
-    let downloaded = match download_nse_report(&client, &config.download, kind, trading_date).await
+    let mut required_error = None;
+    for kind in NseReportKind::margin_files() {
+        if store
+            .report_is_archived(
+                source.exchange(),
+                source.clearing_corporation(),
+                trading_date,
+                kind,
+            )
+            .await?
+        {
+            continue;
+        }
+        match ingest_with_client(config, store, &client, kind, trading_date).await {
+            Ok(receipt) if receipt.accepted => {}
+            Ok(receipt) => {
+                required_error.get_or_insert(DataError::ArchiveRejected {
+                    detail: receipt.note,
+                });
+            }
+            Err(error) if file_not_published(&error) && kind.is_span() => {
+                tracing::info!(
+                    report = kind.code(),
+                    %trading_date,
+                    "SPAN snapshot is not published for this date"
+                );
+            }
+            Err(error) if file_not_published(&error) => {
+                required_error.get_or_insert(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if !store
+        .auxiliary_is_archived(
+            source.exchange(),
+            source.clearing_corporation(),
+            trading_date,
+            "cash_var_dat",
+        )
+        .await?
+        && let Err(error) = archive_cash_var(config, store, &client, trading_date).await
+        && !file_not_published(&error)
     {
+        return Err(error);
+    }
+    if !store
+        .auxiliary_is_archived(
+            source.exchange(),
+            source.clearing_corporation(),
+            trading_date,
+            "contract_master_gzip",
+        )
+        .await?
+        && let Err(error) = archive_contract_master(config, store, &client, trading_date).await
+    {
+        return Err(error);
+    }
+    if !store
+        .span_is_archived(
+            source.exchange(),
+            source.clearing_corporation(),
+            trading_date,
+        )
+        .await?
+    {
+        return Err(DataError::MarginNotFound {
+            detail: format!(
+                "no official SPAN file is archived for {trading_date}, and NSE did not publish one"
+            ),
+        });
+    }
+    if let Some(error) = required_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn file_not_published(error: &DataError) -> bool {
+    matches!(error, DataError::DownloadRejected { detail } if detail.contains("no official file was published"))
+}
+
+async fn archive_cash_var(
+    config: &AppConfig,
+    store: &PgStore,
+    client: &reqwest::Client,
+    trading_date: NaiveDate,
+) -> Result<(), DataError> {
+    let source = verified_nse_source(config)?;
+    let mut missing = None;
+    for batch in (1..=6).rev() {
+        match download_cash_var(client, &config.download, trading_date, batch).await {
+            Ok(downloaded) => {
+                let rejection = CashMarginRates::parse(&downloaded.bytes, trading_date).err();
+                let receipt = archive_auxiliary(
+                    store.pool(),
+                    AuxiliaryArchiveRequest {
+                        source_id: source.id().to_owned(),
+                        exchange: source.exchange(),
+                        clearing_corporation: source.clearing_corporation(),
+                        trading_date,
+                        kind_code: "cash-var".to_owned(),
+                        auxiliary_kind: "cash_var_dat".to_owned(),
+                        filename: downloaded.filename,
+                        source_host: downloaded.source_host,
+                        bytes: downloaded.bytes,
+                        rejection,
+                    },
+                )
+                .await?;
+                if !receipt.accepted {
+                    return Err(DataError::ArchiveRejected {
+                        detail: receipt.note,
+                    });
+                }
+                return Ok(());
+            }
+            Err(error) if file_not_published(&error) => missing = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(missing.unwrap_or(DataError::DownloadRejected {
+        detail: format!("no official file was published for cash-var on {trading_date}"),
+    }))
+}
+
+async fn archive_contract_master(
+    config: &AppConfig,
+    store: &PgStore,
+    client: &reqwest::Client,
+    trading_date: NaiveDate,
+) -> Result<(), DataError> {
+    let source = verified_nse_source(config)?;
+    let downloaded = download_contract_master(client, &config.download, trading_date).await?;
+    let rejection = ContractMaster::parse_gzip(&downloaded.bytes).err();
+    let receipt = archive_auxiliary(
+        store.pool(),
+        AuxiliaryArchiveRequest {
+            source_id: source.id().to_owned(),
+            exchange: source.exchange(),
+            clearing_corporation: source.clearing_corporation(),
+            trading_date,
+            kind_code: "contract-master".to_owned(),
+            auxiliary_kind: "contract_master_gzip".to_owned(),
+            filename: downloaded.filename,
+            source_host: downloaded.source_host,
+            bytes: downloaded.bytes,
+            rejection,
+        },
+    )
+    .await?;
+    if receipt.accepted {
+        Ok(())
+    } else {
+        Err(DataError::ArchiveRejected {
+            detail: receipt.note,
+        })
+    }
+}
+
+async fn ingest_with_client(
+    config: &AppConfig,
+    store: &PgStore,
+    client: &reqwest::Client,
+    kind: NseReportKind,
+    trading_date: NaiveDate,
+) -> Result<IngestReceipt, DataError> {
+    let source = verified_nse_source(config)?;
+    let downloaded = match download_nse_report(client, &config.download, kind, trading_date).await {
         Ok(downloaded) => downloaded,
         Err(error) => {
             if let Err(record_error) = record_download_failure(

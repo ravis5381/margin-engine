@@ -15,7 +15,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use margin_data::{AppStore, DatasetReadModel};
+use margin_data::{AppConfig, AppStore, DatasetReadModel};
 use margin_domain::{
     DatasetId, EQUIVALENCE_CLAIM, EQUIVALENCE_STATEMENT, OFFICIAL_CALCULATION_IMPLEMENTED,
 };
@@ -33,6 +33,7 @@ pub use readiness::{ReadinessCheck, ReadinessReport};
 #[derive(Clone)]
 pub struct AppState {
     pub store: AppStore,
+    pub config: Option<AppConfig>,
     pub body_limit: usize,
     pub request_timeout: Duration,
     pub max_concurrency: usize,
@@ -50,6 +51,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/risk-data/datasets", get(list_datasets))
         .route("/api/v1/risk-data/datasets/{dataset_id}", get(get_dataset))
         .route("/api/v1/margin/calculate", post(margin::calculate_margin))
+        .route(
+            "/api/v1/instruments/canonical",
+            post(margin::canonical_instrument),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(body_limit))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -172,11 +177,21 @@ fn readiness_response(report: ReadinessReport) -> Response {
     (status, Json(body)).into_response()
 }
 
+const MARGIN_CALCULATION: &str = "\
+SPAN margin is the greatest scenario loss in the archived NSE SPAN risk arrays, plus the calendar-spread charge from that file, plus a short-option minimum of zero when the file's rate is zero. \
+A loss is positive for a long unit. Extreme loss margin uses the percent in the contract-wise ELM file. A futures spread charges one third of that percent on the far-month quantity and the full percent on the unmatched quantity. \
+A short option is charged on the SPAN underlying price. Delivery margin on a stock derivative is 10, 25, 45, or 70 percent of the archived cash-market daily margin rate from four weekdays before expiry through the day before expiry, and the full rate on the expiry day. \
+The total is SPAN margin plus extreme loss margin plus delivery margin, and a short option's premium is included. The SPAN file is the latest snapshot whose created time is at or before the trade datetime. That clock is the exchange time in the file, India Standard Time. Lot size comes from the NSE F&O contract file and is reported beside the line. Quantity stays in units. Amounts are rounded half away from zero to paise. \
+This description is the quote method. It is not a reconciliation to NSE Clearing or ICCL.";
+
 #[derive(Serialize, ToSchema)]
-#[schema(description = "Official-data status. Synthetic datasets are excluded from the count.")]
+#[schema(
+    description = "Official-data status. Synthetic datasets are excluded from the count. margin_calculation describes the quote method."
+)]
 struct DataStatusBody {
     equivalence_claim: &'static str,
     statement: &'static str,
+    margin_calculation: &'static str,
     official_calculation_implemented: bool,
     official_validated_datasets: u64,
 }
@@ -187,7 +202,7 @@ struct DataStatusBody {
     tag = "operations",
     operation_id = "data_status",
     summary = "Official data status",
-    description = "Reports whether an official margin calculation is implemented and how many published official datasets are stored. A synthetic dataset does not increase the count.",
+    description = "Reports whether an official margin calculation is implemented, how many published official datasets are stored, and how the margin quote is calculated. A synthetic dataset does not increase the count. The quote method is not a reconciliation to NSE Clearing or ICCL.",
     responses(
         (status = 200, description = "Status was read", body = DataStatusBody),
         (status = 503, description = "Dataset status could not be read", body = ErrorBody)
@@ -200,6 +215,7 @@ async fn data_status(State(state): State<AppState>) -> Response {
             Json(DataStatusBody {
                 equivalence_claim: EQUIVALENCE_CLAIM,
                 statement: EQUIVALENCE_STATEMENT,
+                margin_calculation: MARGIN_CALCULATION,
                 official_calculation_implemented: OFFICIAL_CALCULATION_IMPLEMENTED,
                 official_validated_datasets: count,
             }),

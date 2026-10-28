@@ -44,7 +44,13 @@ margin-engine reconcile --date 2026-10-28
 margin-engine replay --input portfolio.json --date 2026-10-28
 ```
 
-`serve`, `list-datasets`, and NSE `ingest` perform their operation. NSE ingest
+`serve`, `list-datasets`, and NSE `ingest` perform their operation. A margin
+quote for a date with no archived SPAN file downloads that date's verified
+reports before it calculates: each published SPAN snapshot, the exposure file,
+the contract-wise ELM file, and the end-of-day cash-market VaR file from
+`nsearchives.nseindia.com`. A snapshot that NSE has not published is skipped.
+The request timeout in the example configuration is 180 seconds so those
+downloads can finish. NSE ingest
 downloads one verified report and stores the original bytes. A SPAN file becomes
 a draft dataset. Exposure and contract-ELM files become auxiliary rows. The
 command prints the id, filename, and SHA-256, and states that the file is not a
