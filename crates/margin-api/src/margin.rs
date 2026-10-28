@@ -19,10 +19,6 @@ fn money(amount: Decimal) -> String {
     amount.normalize().to_string()
 }
 
-fn ist_stamp(value: NaiveDateTime) -> String {
-    format!("{}+05:30", value.format("%Y-%m-%dT%H:%M:%S"))
-}
-
 fn parse_trading_datetime(value: &str) -> Result<NaiveDateTime, String> {
     let value = value.trim();
     let ist = FixedOffset::east_opt(5 * 3600 + 30 * 60).expect("IST");
@@ -157,95 +153,92 @@ pub struct MarginPositionRequest {
 }
 
 #[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 #[schema(
-    description = "Margin quote in INR. `total_margin` is SPAN margin plus extreme loss margin plus delivery margin. A short option premium is included in that total. Payable premium is reported separately."
+    description = "Combined margin for the book, in INR.",
+    example = json!({
+        "netPremium": "0",
+        "SPANMargin": "6820.54",
+        "exposureMargin": "1466.2",
+        "marginBenefit": "0",
+        "totalMargin": "8286.74"
+    })
 )]
-pub struct MarginResponse {
-    /// `none` until this quote is reconciled to NSE Clearing or ICCL for the same book and file.
-    equivalence_claim: &'static str,
-    /// Parser identity. `nse-span-xml-4.00` for the current quote.
-    method: &'static str,
-    /// Always `INR`.
-    currency: &'static str,
-    /// Business date of the selected SPAN file, `YYYY-MM-DD`.
-    trading_date: String,
-    /// Requested trade time, normalized to India Standard Time.
-    trading_datetime: String,
-    /// `<created>` time of the SPAN file used for this quote, in India Standard Time.
-    span_created: String,
-    /// UUID of the archived SPAN dataset.
-    dataset_id: String,
-    /// `begin_of_day`, `intraday`, or `end_of_day`.
-    snapshot_class: String,
-    /// Intraday sequence `1` through `4`. Absent for begin-of-day and end-of-day.
-    intraday_sequence: Option<u32>,
-    /// Archived SPAN filename, such as `nsccl.20261028.i4.zip`.
-    filename: String,
-    /// SHA-256 of the archived SPAN zip.
-    sha256: String,
-    /// Greatest scenario loss across the book. Zero when every scenario is a gain.
-    scanning_risk: String,
-    /// Calendar-spread charge from the SPAN file, added to scanning risk.
-    spread_charge: String,
-    /// Short-option minimum. Zero when the SPAN file publishes a single zero rate.
-    short_option_minimum: String,
-    /// `scanning_risk` + `spread_charge` + `short_option_minimum`.
+pub struct CombinedMarginBody {
+    /// Signed option premium. A short option is negative. A future is `0`.
+    net_premium: String,
+    /// SPAN margin: greatest scenario loss, plus the calendar-spread charge.
+    #[serde(rename = "SPANMargin")]
     span_margin: String,
-    /// Extreme loss margin from the contract-wise ELM file.
-    extreme_loss_margin: String,
-    /// Signed option premium, `quantity * SPAN option price`. A short option is negative.
-    premium: String,
-    /// Payable premium, `max(0, premium)`. Reported beside the total and not added again.
-    premium_margin: String,
-    /// Delivery margin on stock derivatives inside the expiry window. Zero for an index and outside that window.
-    delivery_margin: String,
-    /// Always `0.00`. Index-constituent cross margin is not applied.
-    cross_margin_benefit: String,
-    /// Reduction already present in a spread, measured on position totals before delivery margin.
+    /// Extreme loss margin. Brokers show this as exposure margin.
+    exposure_margin: String,
+    /// Amount saved by holding the positions together. `0` when there is no saving.
     margin_benefit: String,
-    /// SPAN margin plus extreme loss margin plus delivery margin. A short option premium is included.
+    /// SPAN margin plus exposure margin plus delivery margin. A short option premium is included.
     total_margin: String,
-    /// One line per accepted position, in request order.
-    positions: Vec<MarginLineBody>,
-    /// Which charges this book used.
-    note: &'static str,
 }
 
 #[derive(Serialize, ToSchema)]
-#[schema(description = "One position after it has been matched to a SPAN contract.")]
-pub struct MarginLineBody {
-    /// Symbol as submitted, or the canonical symbol built from the contract fields.
-    symbol: String,
-    /// `NSE:PRODUCT:YYYY-MM-DD:FUT`, `NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE|PE`, or `NSE:PRODUCT:EQ`.
-    canonical: String,
-    /// `future`, `call`, `put`, or `stock`.
-    instrument: String,
-    /// SPAN product code.
+#[serde(rename_all = "camelCase")]
+#[schema(description = "One position in the order it was sent.")]
+pub struct PositionMarginBody {
+    /// `NSE` or `BSE`.
+    exchange: String,
+    /// Symbol that was matched to SPAN.
+    contract: String,
+    /// `FUTURE`, `OPTION`, or `EQUITY`.
     product: String,
-    /// Contract expiry. Absent for a physical stock.
-    expiry: Option<String>,
-    /// Option strike in rupees. Absent for a future and for a stock.
-    strike: Option<String>,
-    /// Signed quantity in units.
-    quantity: String,
-    /// SPAN settlement price for this contract.
-    settlement_price: String,
-    /// SPAN underlying price. Present for an option.
-    underlying_price: Option<String>,
-    /// Greatest scenario loss for this line.
-    scanning_risk: String,
+    /// Strike in rupees. `0` for a future.
+    strike_price: String,
+    /// `FUT`, `CE`, `PE`, or `EQ`.
+    instrument_type: String,
+    /// `BUY` or `SELL`.
+    trade_type: String,
+    /// `CE` or `PE`. Empty for a future.
+    option_type: String,
+    /// Quantity in units. Always positive. The side is `tradeType`.
+    qty: String,
+    /// SPAN margin for this line before the book is netted.
+    #[serde(rename = "SPANMargin")]
+    span_margin: String,
     /// Extreme loss margin for this line.
-    extreme_loss_margin: String,
-    /// Contract ELM percent applied to this line. A spread can charge a smaller percent on the matched far month.
-    elm_percent: String,
-    /// Signed premium for this option. Zero for a future or a stock.
-    premium: String,
-    /// Line total before portfolio netting. The book total can be lower when a spread applies.
+    exposure_margin: String,
+    /// Line total before portfolio netting. The book total can be lower.
     total_margin: String,
-    /// Lot size from the NSE F&O contract master. Absent for a physical stock. Not applied to quantity.
-    lot_size: Option<u32>,
-    /// SPAN scan-point numbers that produced the greatest loss.
-    worst_scan_points: Vec<u32>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+#[schema(
+    description = "Margin quote. Amounts are decimal strings in INR. A calculated zero is `0`.",
+    example = json!({
+        "margin": {
+            "netPremium": "0",
+            "SPANMargin": "6820.54",
+            "exposureMargin": "1466.2",
+            "marginBenefit": "0",
+            "totalMargin": "8286.74"
+        },
+        "positionMargin": [{
+            "exchange": "BSE",
+            "contract": "BSE:SENSEX:2026-10-29:FUT",
+            "product": "FUTURE",
+            "strikePrice": "0",
+            "instrumentType": "FUT",
+            "tradeType": "SELL",
+            "optionType": "",
+            "qty": "1",
+            "SPANMargin": "6820.54",
+            "exposureMargin": "1466.2",
+            "totalMargin": "8286.74"
+        }]
+    })
+)]
+pub struct MarginResponse {
+    /// Combined SPAN, exposure, premium, benefit, and total.
+    margin: CombinedMarginBody,
+    /// One row per position, in request order.
+    position_margin: Vec<PositionMarginBody>,
 }
 
 #[utoipa::path(
@@ -254,10 +247,9 @@ pub struct MarginLineBody {
     tag = "margin",
     operation_id = "calculateMargin",
     summary = "Quote margin for a book",
-    description = "Values one NSE or BSE book on the latest archived SPAN snapshot whose created time is at or before `trading_datetime`.\n\n\
-Exposure, contract ELM, cash-market VaR, and the F&O contract master are the NSE files for that calendar date. A BSE SENSEX book uses the ICCL SPAN file and the ICCL extreme-loss percent for that future month. SENSEX is the combined commodity named BSE 30 SENSEX. If a required file is missing, it is downloaded and the quote is retried once. A time before the first snapshot of the day returns 404.\n\n\
-**Total** = SPAN margin + extreme loss margin + delivery margin. SPAN margin is the greatest scenario loss, plus the calendar-spread charge, plus a short-option minimum of zero when the file rate is zero. A futures spread charges one third of the far-month ELM percent on the matched quantity. A short option premium is included in the total. A book of only long options totals its delivery margin.\n\n\
-An empty book, a zero quantity, a repeated symbol, a non-positive option strike, and a position that sends both a symbol and contract fields are rejected before the archive is read. This quote does not replicate NSE Clearing or ICCL.",
+    description = "Returns the margin for one book.\n\n\
+`margin.totalMargin` is SPAN margin plus exposure margin plus delivery margin. A short option premium is included. `margin.netPremium` is the signed option premium and is not added again. `margin.marginBenefit` is the saving from holding the positions together.\n\n\
+The SPAN file is the latest snapshot published at or before `trading_datetime`. A missing file or contract is an error. A calculated zero is `0`. This quote does not replicate NSE Clearing or ICCL.",
     request_body(
         content = MarginRequest,
         description = "Exchange, trade time, and one to 32 positions.",
@@ -325,54 +317,18 @@ pub async fn calculate_margin(
             (
                 StatusCode::OK,
                 Json(MarginResponse {
-                    equivalence_claim: margin_domain::EQUIVALENCE_CLAIM,
-                    method: match exchange {
-                        Exchange::Nse => "nse-span-xml-4.00",
-                        Exchange::Bse => "iccl-span-xml-4.00",
+                    margin: CombinedMarginBody {
+                        net_premium: money(quote.premium),
+                        span_margin: money(quote.span_margin),
+                        exposure_margin: money(quote.extreme_loss_margin),
+                        margin_benefit: money(quote.margin_benefit),
+                        total_margin: money(quote.total_margin),
                     },
-                    currency: quote.currency,
-                    trading_date: stored.trading_date.to_string(),
-                    trading_datetime: ist_stamp(stored.trading_datetime),
-                    span_created: ist_stamp(stored.span_created),
-                    dataset_id: stored.dataset_id.to_string(),
-                    snapshot_class: stored.snapshot_class,
-                    intraday_sequence: stored.intraday_sequence,
-                    filename: stored.filename,
-                    sha256: stored.sha256,
-                    scanning_risk: quote.scanning_risk.to_string(),
-                    spread_charge: quote.spread_charge.to_string(),
-                    short_option_minimum: quote.short_option_minimum.to_string(),
-                    span_margin: quote.span_margin.to_string(),
-                    extreme_loss_margin: money(quote.extreme_loss_margin),
-                    premium: quote.premium.to_string(),
-                    premium_margin: quote.premium_margin.to_string(),
-                    delivery_margin: quote.delivery_margin.to_string(),
-                    cross_margin_benefit: quote.cross_margin_benefit.to_string(),
-                    margin_benefit: quote.margin_benefit.to_string(),
-                    total_margin: money(quote.total_margin),
-                    positions: quote
+                    position_margin: quote
                         .lines
                         .into_iter()
-                        .map(|line| MarginLineBody {
-                            symbol: line.symbol,
-                            canonical: line.canonical,
-                            instrument: line.instrument.to_owned(),
-                            product: line.product,
-                            expiry: line.expiry.map(|expiry| expiry.to_string()),
-                            strike: line.strike.map(|strike| strike.to_string()),
-                            quantity: line.quantity.to_string(),
-                            settlement_price: line.settlement_price.to_string(),
-                            underlying_price: line.underlying_price.map(|price| price.to_string()),
-                            scanning_risk: line.scanning_risk.to_string(),
-                            extreme_loss_margin: money(line.extreme_loss_margin),
-                            elm_percent: money(line.elm_percent),
-                            premium: line.premium.to_string(),
-                            total_margin: money(line.total_margin),
-                            lot_size: line.lot_size,
-                            worst_scan_points: line.worst_scan_points,
-                        })
+                        .map(|line| position_margin(exchange, line))
                         .collect(),
-                    note: quote.note,
                 }),
             )
                 .into_response()
@@ -388,6 +344,36 @@ pub async fn calculate_margin(
             "database_unavailable",
             error.to_string(),
         ),
+    }
+}
+
+fn position_margin(exchange: Exchange, line: margin_data::MarginLine) -> PositionMarginBody {
+    let sell = line.quantity.is_sign_negative();
+    let qty = if sell {
+        Decimal::ZERO
+            .checked_sub(line.quantity)
+            .unwrap_or(line.quantity)
+    } else {
+        line.quantity
+    };
+    let (product, instrument_type, option_type) = match line.instrument {
+        "call" => ("OPTION", "CE", "CE"),
+        "put" => ("OPTION", "PE", "PE"),
+        "stock" => ("EQUITY", "EQ", ""),
+        _ => ("FUTURE", "FUT", ""),
+    };
+    PositionMarginBody {
+        exchange: exchange.code().to_owned(),
+        contract: line.symbol,
+        product: product.to_owned(),
+        strike_price: line.strike.map(money).unwrap_or_else(|| "0".to_owned()),
+        instrument_type: instrument_type.to_owned(),
+        trade_type: if sell { "SELL" } else { "BUY" }.to_owned(),
+        option_type: option_type.to_owned(),
+        qty: money(qty),
+        span_margin: money(line.scanning_risk),
+        exposure_margin: money(line.extreme_loss_margin),
+        total_margin: money(line.total_margin),
     }
 }
 
@@ -467,14 +453,9 @@ pub struct CanonicalInstrumentResponse {
     tag = "instruments",
     operation_id = "canonicalInstrument",
     summary = "Build a canonical symbol",
-    description = "Builds the symbol the margin route matches to SPAN.\n\n\
-| Right | Symbol |\n\
-| --- | --- |\n\
-| `FUT` | `NSE:UNDERLYING:YYYY-MM-DD:FUT` |\n\
-| `C` or `CE` | `NSE:UNDERLYING:YYYY-MM-DD:STRIKE:CE` |\n\
-| `P` or `PE` | `NSE:UNDERLYING:YYYY-MM-DD:STRIKE:PE` |\n\
-| `EQ` | `NSE:UNDERLYING:EQ` |\n\n\
-The route does not read an archived file and does not return a margin. Use the returned `canonical` as `symbol` on `POST /api/v1/margin/calculate`.",
+    description = "Builds the symbol used by the margin call.\n\n\
+A future is `NSE:NIFTY:2026-11-23:FUT`. An option adds the strike, as in `NSE:NIFTY:2026-11-03:26000:CE`. A stock is `NSE:RELIANCE:EQ`. `C` and `P` come back as `CE` and `PE`.\n\n\
+This call does not read a file and does not return a margin. Send `canonical` as `symbol` on the margin call.",
     request_body = CanonicalInstrumentRequest,
     responses(
         (status = 200, description = "Canonical instrument", body = CanonicalInstrumentResponse),

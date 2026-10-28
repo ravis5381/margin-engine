@@ -73,10 +73,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-#[derive(Serialize, ToSchema)]
-#[schema(
-    description = "Process liveness. This payload does not report the database or the calculation."
-)]
+#[derive(Serialize)]
 struct HealthBody {
     /// Always `ok` when the process answered.
     status: &'static str,
@@ -86,17 +83,6 @@ struct HealthBody {
     equivalence_claim: &'static str,
 }
 
-#[utoipa::path(
-    get,
-    path = "/health",
-    tag = "operations",
-    operation_id = "health",
-    summary = "Check process liveness",
-    description = "Returns 200 when the process is answering. The check does not open the database and does not look at archived files. Use `GET /ready` for production readiness.",
-    responses(
-        (status = 200, description = "The process is answering", body = HealthBody)
-    )
-)]
 async fn health() -> Json<HealthBody> {
     Json(HealthBody {
         status: "ok",
@@ -105,8 +91,7 @@ async fn health() -> Json<HealthBody> {
     })
 }
 
-#[derive(Serialize, ToSchema)]
-#[schema(description = "Readiness report. `status` is `ready` only when every check passed.")]
+#[derive(Serialize)]
 struct ReadinessBody {
     /// `ready` or `not_ready`.
     status: &'static str,
@@ -116,8 +101,7 @@ struct ReadinessBody {
     checks: Vec<ReadinessCheckBody>,
 }
 
-#[derive(Serialize, ToSchema)]
-#[schema(description = "One readiness check.")]
+#[derive(Serialize)]
 struct ReadinessCheckBody {
     /// `database`, `official_validated_dataset`, or `official_calculation`.
     name: &'static str,
@@ -127,19 +111,6 @@ struct ReadinessCheckBody {
     detail: String,
 }
 
-#[utoipa::path(
-    get,
-    path = "/ready",
-    tag = "operations",
-    operation_id = "ready",
-    summary = "Check production readiness",
-    description = "Returns 200 only when the database responds, at least one published official dataset is stored, and an official margin calculation is implemented.\n\n\
-This build keeps `official_calculation` failed, so the route returns 503. A margin quote can still succeed on `POST /api/v1/margin/calculate` while this check is open.",
-    responses(
-        (status = 200, description = "Every readiness check passed", body = ReadinessBody),
-        (status = 503, description = "At least one readiness check failed", body = ReadinessBody)
-    )
-)]
 async fn ready(State(state): State<AppState>) -> Response {
     let (database_ok, database_detail) = match state.store.ping().await {
         Ok(()) => (true, "database connection succeeded".to_owned()),
@@ -197,10 +168,7 @@ A short option is charged on the SPAN underlying price. Delivery margin on a sto
 The total is SPAN margin plus extreme loss margin plus delivery margin, and a short option's premium is included. The SPAN file is the latest snapshot whose created time is at or before the trade datetime. That clock is the exchange time in the file, India Standard Time. Lot size comes from the NSE F&O contract file and is reported beside the line. Quantity stays in units. Amounts are rounded half away from zero to paise. \
 This description is the quote method. It is not a reconciliation to NSE Clearing or ICCL.";
 
-#[derive(Serialize, ToSchema)]
-#[schema(
-    description = "Claim gate and the method used by the margin quote. The count includes published official datasets only."
-)]
+#[derive(Serialize)]
 struct DataStatusBody {
     /// `none` until a quote is reconciled to a clearing-corporation reference.
     equivalence_claim: &'static str,
@@ -214,19 +182,6 @@ struct DataStatusBody {
     official_validated_datasets: u64,
 }
 
-#[utoipa::path(
-    get,
-    path = "/api/v1/data/status",
-    tag = "operations",
-    operation_id = "dataStatus",
-    summary = "Read calculation status",
-    description = "Returns the equivalence claim, whether an official calculation is implemented, how many published official datasets are stored, and the method text used by the margin quote.\n\n\
-A synthetic dataset does not increase the count. `margin_calculation` describes the quote. It is not a reconciliation to NSE Clearing or ICCL.",
-    responses(
-        (status = 200, description = "Status was read", body = DataStatusBody),
-        (status = 503, description = "Dataset status could not be read", body = ErrorBody)
-    )
-)]
 async fn data_status(State(state): State<AppState>) -> Response {
     match state.store.validated_dataset_count().await {
         Ok(count) => (
@@ -248,10 +203,7 @@ async fn data_status(State(state): State<AppState>) -> Response {
     }
 }
 
-#[derive(Serialize, ToSchema)]
-#[schema(
-    description = "One page of archived risk-dataset metadata. The page holds at most 500 rows."
-)]
+#[derive(Serialize)]
 struct DatasetListBody {
     /// `none` until an official calculation is reconciled.
     equivalence_claim: &'static str,
@@ -261,8 +213,7 @@ struct DatasetListBody {
     datasets: Vec<DatasetBody>,
 }
 
-#[derive(Serialize, ToSchema)]
-#[schema(description = "One archived risk dataset.")]
+#[derive(Serialize)]
 struct DatasetEnvelope {
     /// `none` until an official calculation is reconciled.
     equivalence_claim: &'static str,
@@ -270,10 +221,7 @@ struct DatasetEnvelope {
     dataset: DatasetBody,
 }
 
-#[derive(Serialize, ToSchema)]
-#[schema(
-    description = "Metadata for one archived risk file. Source URLs and file bytes are omitted."
-)]
+#[derive(Serialize)]
 struct DatasetBody {
     /// Dataset UUID. Pass this to `GET /api/v1/risk-data/datasets/{dataset_id}`.
     id: String,
@@ -333,19 +281,6 @@ struct ErrorDetail {
     message: String,
 }
 
-#[utoipa::path(
-    get,
-    path = "/api/v1/risk-data/datasets",
-    tag = "risk-data",
-    operation_id = "listDatasets",
-    summary = "List archived risk datasets",
-    description = "Returns metadata for archived risk files, newest trading date first. The page stops at 500 rows and sets `truncated` when more exist.\n\n\
-The payload has no margin amounts, no file bytes, and no source URLs. Use `id` with `GET /api/v1/risk-data/datasets/{dataset_id}`.",
-    responses(
-        (status = 200, description = "Dataset metadata page", body = DatasetListBody),
-        (status = 503, description = "Dataset list could not be read", body = ErrorBody)
-    )
-)]
 async fn list_datasets(State(state): State<AppState>) -> Response {
     match state.store.list_datasets().await {
         Ok(page) => (
@@ -365,23 +300,6 @@ async fn list_datasets(State(state): State<AppState>) -> Response {
     }
 }
 
-#[utoipa::path(
-    get,
-    path = "/api/v1/risk-data/datasets/{dataset_id}",
-    tag = "risk-data",
-    operation_id = "getDataset",
-    summary = "Read one archived risk dataset",
-    description = "Returns metadata for one archived dataset. `dataset_id` is the UUID from the list route, not a symbol or a filename.",
-    params(
-        ("dataset_id" = String, Path, description = "Dataset UUID, for example `01a181f5-3bfc-75d7-814c-45ec83f3c8df`.")
-    ),
-    responses(
-        (status = 200, description = "Dataset metadata", body = DatasetEnvelope),
-        (status = 400, description = "dataset_id is not a UUID", body = ErrorBody),
-        (status = 404, description = "No dataset has that id", body = ErrorBody),
-        (status = 503, description = "Dataset could not be read", body = ErrorBody)
-    )
-)]
 async fn get_dataset(State(state): State<AppState>, Path(dataset_id): Path<String>) -> Response {
     let Ok(uuid) = Uuid::parse_str(&dataset_id) else {
         return error_response(

@@ -166,15 +166,21 @@ async fn openapi_documents_published_routes_and_swagger_ui_loads() {
             .contains("does not replicate")
     );
     let paths = body["paths"].as_object().expect("paths");
-    assert!(paths.contains_key("/health"));
-    assert!(paths.contains_key("/ready"));
-    assert!(paths.contains_key("/api/v1/data/status"));
-    assert!(paths.contains_key("/api/v1/risk-data/datasets"));
-    assert!(paths.contains_key("/api/v1/risk-data/datasets/{dataset_id}"));
     assert!(paths.contains_key("/api/v1/margin/calculate"));
     assert!(paths.contains_key("/api/v1/instruments/canonical"));
-    assert!(!paths.contains_key("/api/v1/risk-data/ingest"));
-    assert_eq!(paths.len(), 7);
+    assert!(!paths.contains_key("/health"));
+    assert!(!paths.contains_key("/ready"));
+    assert!(!paths.contains_key("/api/v1/data/status"));
+    assert!(!paths.contains_key("/api/v1/risk-data/datasets"));
+    assert_eq!(paths.len(), 2);
+    let margin_schema = &body["components"]["schemas"]["MarginResponse"];
+    assert!(margin_schema["properties"].get("positionMargin").is_some());
+    assert!(margin_schema["properties"].get("margin").is_some());
+    assert!(
+        body["components"]["schemas"]["CombinedMarginBody"]["properties"]
+            .get("SPANMargin")
+            .is_some()
+    );
 
     let response = router(state(Vec::new()))
         .oneshot(
@@ -218,7 +224,6 @@ async fn openapi_documents_published_routes_and_swagger_ui_loads() {
     )
     .expect("script");
     assert!(script.contains("/api/v1/openapi.json"));
-    assert!(script.contains("\"filter\": true"));
     assert!(script.contains("\"tryItOutEnabled\": true"));
 
     let trading_datetime = &body["components"]["schemas"]["MarginRequest"]["properties"]["trading_datetime"]
