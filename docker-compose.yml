@@ -1,10 +1,9 @@
 services:
   postgres:
     image: postgres:16
-    environment:
-      POSTGRES_USER: margin
-      POSTGRES_PASSWORD: margin
-      POSTGRES_DB: margin_engine
+    env_file:
+      - path: ./config/compose.env
+        required: true
     ports:
       - "5432:5432"
     healthcheck:
@@ -19,11 +18,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
-      DATABASE_URL: postgres://margin:margin@postgres:5432/margin_engine
-      BIND_ADDR: 0.0.0.0:8080
-      RUST_LOG: info,sqlx=warn
-      MARGIN_LOG_FORMAT: json
+    env_file:
+      - path: ./config/compose.env
+        required: true
     ports:
       - "8080:8080"
 
