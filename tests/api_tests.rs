@@ -176,11 +176,30 @@ async fn openapi_documents_published_routes_and_swagger_ui_loads() {
     let margin_schema = &body["components"]["schemas"]["MarginResponse"];
     assert!(margin_schema["properties"].get("positionMargin").is_some());
     assert!(margin_schema["properties"].get("margin").is_some());
+    let combined = &body["components"]["schemas"]["CombinedMarginBody"]["properties"];
+    for field in [
+        "SPANMargin",
+        "exposureMargin",
+        "elm",
+        "deliveryMargin",
+        "additionalMargin",
+        "tenderMargin",
+        "specialMargin",
+        "additionalPreExpiryMargin",
+        "netPremium",
+        "marginBenefit",
+        "totalMargin",
+    ] {
+        assert!(combined.get(field).is_some(), "{field}");
+    }
     assert!(
-        body["components"]["schemas"]["CombinedMarginBody"]["properties"]
-            .get("SPANMargin")
+        margin_schema["properties"]
+            .get("totalPositionMargin")
             .is_some()
     );
+    let line = &body["components"]["schemas"]["PositionMarginBody"]["properties"];
+    assert!(line.get("premium").is_some());
+    assert!(line.get("elm").is_some());
 
     let response = router(state(Vec::new()))
         .oneshot(

@@ -160,6 +160,12 @@ pub struct MarginPositionRequest {
         "netPremium": "0",
         "SPANMargin": "6820.54",
         "exposureMargin": "1466.2",
+        "elm": "1466.2",
+        "deliveryMargin": "0",
+        "additionalMargin": "0",
+        "tenderMargin": "0",
+        "specialMargin": "0",
+        "additionalPreExpiryMargin": "0",
         "marginBenefit": "0",
         "totalMargin": "8286.74"
     })
@@ -167,14 +173,26 @@ pub struct MarginPositionRequest {
 pub struct CombinedMarginBody {
     /// Signed option premium. A short option is negative. A future is `0`.
     net_premium: String,
-    /// SPAN margin: greatest scenario loss, plus the calendar-spread charge.
+    /// Scanning risk plus the calendar-spread charge, adjusted by the net option premium. A short premium increases it. A long premium decreases it, and it is not negative.
     #[serde(rename = "SPANMargin")]
     span_margin: String,
-    /// Extreme loss margin. Brokers show this as exposure margin.
+    /// Extreme loss margin. Same amount as `elm`.
     exposure_margin: String,
+    /// Extreme loss margin. Same amount as `exposureMargin`.
+    elm: String,
+    /// Delivery margin. `0` for an index and outside the stock delivery window.
+    delivery_margin: String,
+    /// Separate additional margin. An additional extreme-loss percent is already inside `elm`. This charge is `0`.
+    additional_margin: String,
+    /// Tender margin. This quote does not levy it. The amount is `0`.
+    tender_margin: String,
+    /// Special margin. This quote does not levy it. The amount is `0`.
+    special_margin: String,
+    /// Additional pre-expiry margin. This quote does not levy it. The amount is `0`.
+    additional_pre_expiry_margin: String,
     /// Amount saved by holding the positions together. `0` when there is no saving.
     margin_benefit: String,
-    /// SPAN margin plus exposure margin plus delivery margin. A short option premium is included.
+    /// SPAN margin plus extreme loss margin plus delivery margin. Premium is already inside SPAN margin.
     total_margin: String,
 }
 
@@ -198,11 +216,15 @@ pub struct PositionMarginBody {
     option_type: String,
     /// Quantity in units. Always positive. The side is `tradeType`.
     qty: String,
-    /// SPAN margin for this line before the book is netted.
+    /// Signed option premium for this line. A short is negative. A future is `0`.
+    premium: String,
+    /// Scanning risk for this line adjusted by its premium, before the book is netted. A long option is `0` when the premium covers the scan.
     #[serde(rename = "SPANMargin")]
     span_margin: String,
-    /// Extreme loss margin for this line.
+    /// Extreme loss margin for this line. Same amount as `elm`.
     exposure_margin: String,
+    /// Extreme loss margin for this line. Same amount as `exposureMargin`.
+    elm: String,
     /// Line total before portfolio netting. The book total can be lower.
     total_margin: String,
 }
@@ -216,9 +238,16 @@ pub struct PositionMarginBody {
             "netPremium": "0",
             "SPANMargin": "6820.54",
             "exposureMargin": "1466.2",
+            "elm": "1466.2",
+            "deliveryMargin": "0",
+            "additionalMargin": "0",
+            "tenderMargin": "0",
+            "specialMargin": "0",
+            "additionalPreExpiryMargin": "0",
             "marginBenefit": "0",
             "totalMargin": "8286.74"
         },
+        "totalPositionMargin": "8286.74",
         "positionMargin": [{
             "exchange": "BSE",
             "contract": "BSE:SENSEX:2026-10-29:FUT",
@@ -228,15 +257,19 @@ pub struct PositionMarginBody {
             "tradeType": "SELL",
             "optionType": "",
             "qty": "1",
+            "premium": "0",
             "SPANMargin": "6820.54",
             "exposureMargin": "1466.2",
+            "elm": "1466.2",
             "totalMargin": "8286.74"
         }]
     })
 )]
 pub struct MarginResponse {
-    /// Combined SPAN, exposure, premium, benefit, and total.
+    /// Combined SPAN, extreme loss, delivery, premium, benefit, and total.
     margin: CombinedMarginBody,
+    /// Sum of the position totals before the book is netted.
+    total_position_margin: String,
     /// One row per position, in request order.
     position_margin: Vec<PositionMarginBody>,
 }
@@ -248,7 +281,7 @@ pub struct MarginResponse {
     operation_id = "calculateMargin",
     summary = "Quote margin for a book",
     description = "Returns the margin for one book.\n\n\
-`margin.totalMargin` is SPAN margin plus exposure margin plus delivery margin. A short option premium is included. `margin.netPremium` is the signed option premium and is not added again. `margin.marginBenefit` is the saving from holding the positions together.\n\n\
+`margin.SPANMargin` is the scanning risk plus the calendar-spread charge, plus a short option premium, minus a long option premium. It is `0` when the long premium covers the scan. `margin.netPremium` is that premium with its sign and is not added again. `margin.totalMargin` is SPAN margin plus extreme loss margin plus delivery margin. A long option book whose premium covers the scan has SPAN `0` and a total equal to its delivery margin. `margin.elm` is the extreme loss margin, the same amount as `margin.exposureMargin`. Additional, tender, special, and pre-expiry margin are `0`. `margin.marginBenefit` is the saving from holding the positions together. `totalPositionMargin` is the sum of the position totals before that saving.\n\n\
 The SPAN file is the latest snapshot published at or before `trading_datetime`. A missing file or contract is an error. A calculated zero is `0`. This quote does not replicate NSE Clearing or ICCL.",
     request_body(
         content = MarginRequest,
@@ -312,27 +345,12 @@ pub async fn calculate_margin(
         other => other,
     };
     match stored {
-        Ok(stored) => {
-            let quote = stored.quote;
-            (
-                StatusCode::OK,
-                Json(MarginResponse {
-                    margin: CombinedMarginBody {
-                        net_premium: money(quote.premium),
-                        span_margin: money(quote.span_margin),
-                        exposure_margin: money(quote.extreme_loss_margin),
-                        margin_benefit: money(quote.margin_benefit),
-                        total_margin: money(quote.total_margin),
-                    },
-                    position_margin: quote
-                        .lines
-                        .into_iter()
-                        .map(|line| position_margin(exchange, line))
-                        .collect(),
-                }),
-            )
-                .into_response()
-        }
+        Ok(stored) => match quote_body(exchange, stored.quote) {
+            Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+            Err(detail) => {
+                error_response(StatusCode::UNPROCESSABLE_ENTITY, "margin_rejected", detail)
+            }
+        },
         Err(DataError::MarginNotFound { detail }) => {
             error_response(StatusCode::NOT_FOUND, "span_file_not_found", detail)
         }
@@ -347,7 +365,74 @@ pub async fn calculate_margin(
     }
 }
 
-fn position_margin(exchange: Exchange, line: margin_data::MarginLine) -> PositionMarginBody {
+const NO_CHARGE: &str = "0";
+
+fn quote_body(
+    exchange: Exchange,
+    quote: margin_data::SpanMarginQuote,
+) -> Result<MarginResponse, String> {
+    let total_position_margin = quote
+        .lines
+        .iter()
+        .try_fold(Decimal::ZERO, |total, line| {
+            total.checked_add(line.total_margin)
+        })
+        .ok_or_else(|| "position total overflowed".to_owned())?;
+    let span_margin = span_after_premium(quote.span_margin, quote.premium)?;
+    let total_margin = span_margin
+        .checked_add(quote.extreme_loss_margin)
+        .and_then(|amount| amount.checked_add(quote.delivery_margin))
+        .ok_or_else(|| "total margin overflowed".to_owned())?;
+    let before_delivery = total_margin
+        .checked_sub(quote.delivery_margin)
+        .ok_or_else(|| "total margin overflowed".to_owned())?;
+    let margin_benefit = total_position_margin
+        .checked_sub(before_delivery)
+        .filter(|gap| gap.is_sign_positive())
+        .unwrap_or(Decimal::ZERO);
+    let elm = money(quote.extreme_loss_margin);
+    let position_margin = quote
+        .lines
+        .into_iter()
+        .map(|line| position_margin(exchange, line))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(MarginResponse {
+        margin: CombinedMarginBody {
+            net_premium: money(quote.premium),
+            span_margin: money(span_margin),
+            exposure_margin: elm.clone(),
+            elm,
+            delivery_margin: money(quote.delivery_margin),
+            additional_margin: NO_CHARGE.to_owned(),
+            tender_margin: NO_CHARGE.to_owned(),
+            special_margin: NO_CHARGE.to_owned(),
+            additional_pre_expiry_margin: NO_CHARGE.to_owned(),
+            margin_benefit: money(margin_benefit),
+            total_margin: money(total_margin),
+        },
+        total_position_margin: money(total_position_margin),
+        position_margin,
+    })
+}
+
+/// Broker SPAN subtracts the signed option premium from the scanning risk.
+/// A short premium is negative, so it increases SPAN. A long premium decreases it.
+/// The result is zero when the long premium covers the scan.
+fn span_after_premium(span: Decimal, premium: Decimal) -> Result<Decimal, String> {
+    let net = span
+        .checked_sub(premium)
+        .ok_or_else(|| "SPAN margin overflowed".to_owned())?;
+    Ok(if net.is_sign_negative() {
+        Decimal::ZERO
+    } else {
+        net
+    })
+}
+
+fn position_margin(
+    exchange: Exchange,
+    line: margin_data::MarginLine,
+) -> Result<PositionMarginBody, String> {
     let sell = line.quantity.is_sign_negative();
     let qty = if sell {
         Decimal::ZERO
@@ -362,7 +447,8 @@ fn position_margin(exchange: Exchange, line: margin_data::MarginLine) -> Positio
         "stock" => ("EQUITY", "EQ", ""),
         _ => ("FUTURE", "FUT", ""),
     };
-    PositionMarginBody {
+    let elm = money(line.extreme_loss_margin);
+    Ok(PositionMarginBody {
         exchange: exchange.code().to_owned(),
         contract: line.symbol,
         product: product.to_owned(),
@@ -371,9 +457,51 @@ fn position_margin(exchange: Exchange, line: margin_data::MarginLine) -> Positio
         trade_type: if sell { "SELL" } else { "BUY" }.to_owned(),
         option_type: option_type.to_owned(),
         qty: money(qty),
-        span_margin: money(line.scanning_risk),
-        exposure_margin: money(line.extreme_loss_margin),
+        premium: money(line.premium),
+        span_margin: money(span_after_premium(line.scanning_risk, line.premium)?),
+        exposure_margin: elm.clone(),
+        elm,
         total_margin: money(line.total_margin),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::span_after_premium;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    #[test]
+    fn option_premium_adjusts_span_like_the_broker_calculator() {
+        let span = Decimal::from_str("130887.6").expect("span");
+        let premium = Decimal::from_str("-107568").expect("premium");
+        assert_eq!(
+            span_after_premium(span, premium).expect("span").to_string(),
+            "238455.6"
+        );
+        let call = Decimal::from_str("106941.6").expect("call");
+        let call_premium = Decimal::from_str("-17574").expect("call premium");
+        assert_eq!(
+            span_after_premium(call, call_premium)
+                .expect("call span")
+                .to_string(),
+            "124515.6"
+        );
+        assert_eq!(
+            span_after_premium(span, Decimal::ZERO).expect("future"),
+            span
+        );
+        let long_scan = Decimal::from_str("35071.2").expect("long scan");
+        let long_premium = Decimal::from_str("107568").expect("long premium");
+        assert_eq!(
+            span_after_premium(long_scan, long_premium).expect("long"),
+            Decimal::ZERO
+        );
+        let covered = Decimal::from_str("17574").expect("covered");
+        assert_eq!(
+            span_after_premium(covered, covered).expect("covered"),
+            Decimal::ZERO
+        );
     }
 }
 

@@ -1,6 +1,7 @@
-//! HTTP API. The margin route returns SPAN scanning risk, the calendar-spread
-//! charge, extreme loss margin, option premium, and delivery margin. Cross-margin
-//! benefit is zero. It does not
+//! HTTP API. The margin route returns SPAN margin adjusted by the option premium:
+//! a short premium increases it and a long premium decreases it, down to zero.
+//! The total is that SPAN margin plus extreme loss margin plus delivery margin.
+//! Additional, tender, special, and pre-expiry margin are zero. It does not
 //! return a zero or null amount when the file or the contract is missing. A
 //! calculated scanning risk of zero is returned when every scenario is a gain.
 //!
@@ -162,10 +163,10 @@ fn readiness_response(report: ReadinessReport) -> Response {
 }
 
 const MARGIN_CALCULATION: &str = "\
-SPAN margin is the greatest scenario loss in the archived NSE SPAN risk arrays, plus the calendar-spread charge from that file, plus a short-option minimum of zero when the file's rate is zero. \
-A loss is positive for a long unit. Extreme loss margin uses the percent in the contract-wise ELM file. A futures spread charges one third of that percent on the far-month quantity and the full percent on the unmatched quantity. \
+SPAN margin is the greatest scenario loss in the archived NSE SPAN risk arrays, plus the calendar-spread charge from that file, plus a short-option minimum of zero when the file's rate is zero, plus a short option premium, minus a long option premium. It is zero when the long premium covers the scan. \
+A loss is positive for a long unit. Extreme loss margin uses the percent in the contract-wise ELM file and is returned as exposure margin and as elm. A futures spread charges one third of that percent on the far-month quantity and the full percent on the unmatched quantity. \
 A short option is charged on the SPAN underlying price. Delivery margin on a stock derivative is 10, 25, 45, or 70 percent of the archived cash-market daily margin rate from four weekdays before expiry through the day before expiry, and the full rate on the expiry day. \
-The total is SPAN margin plus extreme loss margin plus delivery margin, and a short option's premium is included. The SPAN file is the latest snapshot whose created time is at or before the trade datetime. That clock is the exchange time in the file, India Standard Time. Lot size comes from the NSE F&O contract file and is reported beside the line. Quantity stays in units. Amounts are rounded half away from zero to paise. \
+Additional margin, tender margin, special margin, and additional pre-expiry margin are zero. The total is SPAN margin plus extreme loss margin plus delivery margin. The option premium is inside SPAN margin and is not added again. A long option book whose premium covers the scan has SPAN zero and a total equal to its delivery margin. The SPAN file is the latest snapshot whose created time is at or before the trade datetime. That clock is the exchange time in the file, India Standard Time. Lot size comes from the NSE F&O contract file and is reported beside the line. Quantity stays in units. Amounts are rounded half away from zero to paise. \
 This description is the quote method. It is not a reconciliation to NSE Clearing or ICCL.";
 
 #[derive(Serialize)]

@@ -40,7 +40,7 @@ This API does not replicate NSE Clearing or ICCL.";
         CanonicalInstrumentResponse
     )),
     tags(
-        (name = "margin", description = "SPAN margin, exposure margin, premium, and the total for one book."),
+        (name = "margin", description = "SPAN margin, extreme loss margin, delivery margin, premium, and the total for one book."),
         (name = "instruments", description = "Build the symbol the margin call matches. This does not return a margin.")
     )
 )]
