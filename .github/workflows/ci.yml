@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: margin
+          POSTGRES_PASSWORD: margin
+          POSTGRES_DB: margin_engine
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U margin -d margin_engine"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://margin:margin@localhost:5432/margin_engine
+      MARGIN_ENGINE_SKIP_DOTENV: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace

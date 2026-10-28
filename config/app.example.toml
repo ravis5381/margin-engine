@@ -1,0 +1,35 @@
+[server]
+bind = "127.0.0.1:8080"
+request_body_limit_bytes = 1048576
+request_timeout_secs = 30
+max_concurrency = 64
+
+[database]
+max_connections = 5
+acquire_timeout_secs = 5
+
+[logging]
+format = "json"
+
+[archive]
+max_file_bytes = 104857600
+
+[download]
+timeout_secs = 30
+max_redirects = 2
+
+# Operator configuration for the ordinary clearing relationship.
+# This is not an interoperability grant and does not authorize cross-exchange offsets.
+[[clearing_arrangements]]
+exchange = "NSE"
+clearing_corporation = "NSCCL"
+effective_from = "2020-01-01"
+cross_exchange_offset_permitted = false
+rule_reference = "config: ordinary NSE to NSE Clearing arrangement; not an interoperability offset"
+
+[[clearing_arrangements]]
+exchange = "BSE"
+clearing_corporation = "ICCL"
+effective_from = "2020-01-01"
+cross_exchange_offset_permitted = false
+rule_reference = "config: ordinary BSE to ICCL arrangement; not an interoperability offset"

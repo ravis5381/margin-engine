@@ -1,0 +1,31 @@
+# Approved HTTPS hosts. A host on this list can be contacted only by an enabled
+# source whose URL uses that host. It does not authorize any other site.
+
+[[approved_hosts]]
+host = "www.nseclearing.in"
+
+[[approved_hosts]]
+host = "www.nseindia.com"
+
+[[approved_hosts]]
+host = "www.icclindia.com"
+
+[[approved_hosts]]
+host = "www.bseindia.com"
+
+[[sources]]
+id = "nse-clearing-equity-derivatives"
+enabled = true
+exchange = "NSE"
+clearing_corporation = "NSCCL"
+url = "https://www.nseindia.com/api/reports"
+# The reports endpoint was verified by downloading files. Enabling it archives
+# those bytes. It does not parse SPAN records or apply ELM percentages.
+
+[[sources]]
+id = "iccl-equity-derivatives-risk-parameters"
+enabled = false
+exchange = "BSE"
+clearing_corporation = "ICCL"
+url = "https://www.icclindia.com/riskmgmt/RiskparameterNEW.aspx"
+blocker = "The ICCL page redirects to https://www.bseclearing.com/riskmgmt/RiskparameterNEW.aspx, an HTML form. No file response was captured, so the ICCL adapter stays disabled."

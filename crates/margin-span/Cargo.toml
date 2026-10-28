@@ -1,0 +1,15 @@
+[package]
+name = "margin-span"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SPAN calculation components. Official scanning risk is not implemented."
+
+[dependencies]
+margin-domain.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

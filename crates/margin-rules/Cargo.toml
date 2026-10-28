@@ -1,0 +1,16 @@
+[package]
+name = "margin-rules"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Exchange and clearing-corporation margin policy. No charge schedule is implemented."
+
+[dependencies]
+chrono.workspace = true
+margin-domain.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

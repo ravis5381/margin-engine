@@ -1,0 +1,104 @@
+[workspace]
+resolver = "3"
+members = [
+    ".",
+    "crates/margin-api",
+    "crates/margin-data",
+    "crates/margin-domain",
+    "crates/margin-reconciliation",
+    "crates/margin-rules",
+    "crates/margin-span",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "UNLICENSED"
+rust-version = "1.88"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+float_arithmetic = "deny"
+
+[workspace.dependencies]
+margin-api = { path = "crates/margin-api" }
+margin-data = { path = "crates/margin-data" }
+margin-domain = { path = "crates/margin-domain" }
+margin-reconciliation = { path = "crates/margin-reconciliation" }
+margin-rules = { path = "crates/margin-rules" }
+margin-span = { path = "crates/margin-span" }
+anyhow = "1"
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+clap = { version = "4", features = ["derive"] }
+criterion = "0.5"
+dotenvy = "0.15"
+http-body-util = "0.1"
+proptest = "1"
+quick-xml = "0.37"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "rustls-tls"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "derive", "chrono", "rust_decimal", "uuid", "json"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+toml = "0.9"
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["limit", "request-id", "timeout", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+url = "2"
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+uuid = { version = "1", features = ["serde", "v7"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[package]
+name = "margin-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Indian equity derivatives margin engine"
+
+[[bin]]
+name = "margin-engine"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+margin-api.workspace = true
+margin-data.workspace = true
+margin-domain.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+chrono.workspace = true
+http-body-util.workspace = true
+margin-reconciliation.workspace = true
+margin-rules.workspace = true
+margin-span.workspace = true
+proptest.workspace = true
+rust_decimal.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tower.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

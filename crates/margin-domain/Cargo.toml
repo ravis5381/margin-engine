@@ -1,0 +1,26 @@
+[package]
+name = "margin-domain"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Domain types for the Indian equity derivatives margin engine"
+
+[dependencies]
+chrono.workspace = true
+rust_decimal.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+serde_json.workspace = true
+
+[[bench]]
+name = "money_aggregation"
+harness = false
+
+[lints]
+workspace = true
