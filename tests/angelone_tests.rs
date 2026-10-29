@@ -10,15 +10,19 @@
 //! of that index: the file still says 2.00, and the extra 2 points are the
 //! expiry-day charge on Angel One's calculator date of 29 October. A long
 //! option of either expiry matches Angel One. The test does not
-//! call Angel One. It needs the archived files for that session in PostgreSQL.
-//! The HDFCBANK 700 call exposure is 15590.58. Angel One showed 15590.57; the
+//! call Angel One. When the 28 October files are not already in PostgreSQL,
+//! the test downloads them from NSE and BSE, which is how it runs in GitHub
+//! Actions. The HDFCBANK 700 call exposure is 15590.58. Angel One showed 15590.57; the
 //! unrounded charge is 15590.575 and this quote rounds half away from zero.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use margin_api::{AppState, router};
-use margin_data::{AppStore, PgStore, connect};
+use margin_data::{
+    AppStore, ConfigFile, PgStore, RuntimeEnv, assemble, connect, ensure_iccl_margin_files,
+    ensure_nse_margin_files, migrate,
+};
 use std::time::Duration;
 use tower::ServiceExt;
 
@@ -546,8 +550,18 @@ async fn session_2026_10_28_matches_captured_angel_one_replies() {
     let pool = connect(&url, 2, Duration::from_secs(5))
         .await
         .expect("connect");
+    migrate(&pool).await.expect("migrate");
+    let store = PgStore::new(pool);
+    let config = session_config(&url);
+    let session = chrono::NaiveDate::from_ymd_opt(2026, 10, 28).expect("session date");
+    ensure_nse_margin_files(&config, &store, session)
+        .await
+        .expect("NSE margin files for 2026-10-28");
+    ensure_iccl_margin_files(&config, &store, session)
+        .await
+        .expect("BSE margin files for 2026-10-28");
     let state = AppState {
-        store: AppStore::Postgres(PgStore::new(pool)),
+        store: AppStore::Postgres(store),
         config: None,
         body_limit: 16_384,
         request_timeout: Duration::from_secs(180),
@@ -637,23 +651,25 @@ async fn session_2026_10_28_matches_captured_angel_one_replies() {
             r#"{{"exchange":"{exchange}","trading_datetime":"{trading_datetime}","positions":{positions}}}"#
         );
         let (status, actual) = send(&state, &body).await;
-        if status == StatusCode::NOT_FOUND && span_archive_missing(&actual) {
-            eprintln!(
-                "SPAN files for {trading_datetime} are not archived; skipping Angel One reply test"
-            );
-            return;
-        }
         assert_eq!(status, StatusCode::OK, "{name}: {actual}");
         let expected: serde_json::Value = serde_json::from_str(expected).expect(name);
         assert_eq!(actual, expected, "{name}");
     }
 }
 
-fn span_archive_missing(body: &serde_json::Value) -> bool {
-    body["error"]["code"] == "span_file_not_found"
-        && body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("no official SPAN file is archived"))
+fn session_config(database_url: &str) -> margin_data::AppConfig {
+    let app = include_str!("../config/app.example.toml")
+        .replace("timeout_secs = 30", "timeout_secs = 120");
+    assemble(
+        ConfigFile::Contents(app),
+        ConfigFile::Contents(include_str!("../config/data_sources.example.toml").to_owned()),
+        RuntimeEnv {
+            database_url: Some(database_url.to_owned()),
+            bind_addr: None,
+            log_format: None,
+        },
+    )
+    .expect("example config")
 }
 
 async fn send(state: &AppState, body: &str) -> (StatusCode, serde_json::Value) {

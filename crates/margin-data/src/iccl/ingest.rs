@@ -226,7 +226,8 @@ async fn archive_elm(
         }
     };
     let rejection = ContractElmRates::parse_iccl_zip(&bytes).err();
-    archive_auxiliary(
+    let parsed = rejection.is_none();
+    let receipt = archive_auxiliary(
         store.pool(),
         AuxiliaryArchiveRequest {
             source_id: source.id().to_owned(),
@@ -241,7 +242,14 @@ async fn archive_elm(
             rejection,
         },
     )
-    .await
+    .await?;
+    if parsed && receipt.disposition == "duplicate" {
+        return Ok(IngestReceipt {
+            accepted: true,
+            ..receipt
+        });
+    }
+    Ok(receipt)
 }
 
 async fn download_catalog(
