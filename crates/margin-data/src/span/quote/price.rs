@@ -11,7 +11,7 @@ use chrono::{Datelike, NaiveDate, Weekday};
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) const NOTE_BSE: &str = "SPAN scanning risk from the archived ICCL XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. SENSEX is the combined commodity named BSE 30 SENSEX. Extreme loss margin uses the total percent in the archived ICCL extreme-loss file for that future month. Delivery margin is zero for an index. The total is SPAN margin plus that extreme loss margin. Reported amounts are rounded half away from zero to paise. This quote does not replicate ICCL.";
+pub(super) const NOTE_BSE: &str = "SPAN scanning risk from the archived ICCL XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. SENSEX is the combined commodity named BSE 30 SENSEX. Extreme loss margin for a future uses the total percent in the archived ICCL extreme-loss file for that future month and the futures settlement. A short option uses the IO or SO total percent for that expiry and strike, and the SPAN underlying price. A long option has no extreme loss margin. Delivery margin is zero for an index. The total is SPAN margin plus that extreme loss margin. Reported amounts are rounded half away from zero to paise. This quote does not replicate ICCL.";
 pub(super) const NOTE: &str = "SPAN scanning risk from the archived XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. Calendar spreads add the flat charge from the SPAN file and, for futures, extreme loss margin on one third of the far-month quantity. An index spread that includes a contract expiring on the trade date is not offset. Reported amounts are rounded half away from zero to paise. Delivery margin on a stock derivative is 10, 25, 45, or 70 percent of the archived cash-market daily margin rate from four trading days before expiry through the day before expiry, and the full rate on the expiry day. The quantity is the net shares that expiry would deliver. It is zero outside that window and for an index. The total is SPAN margin plus exposure margin plus delivery margin. Margin benefit compares the separate position totals with the total before delivery margin. Cross-margin benefit is zero.";
 pub(super) const NOTE_SHORT_OPTION: &str = "SPAN scanning risk from the archived XML risk arrays. Loss is positive for a long unit. Scanning risk is the greatest scenario loss, and it is zero when every scenario is a gain. The short-option minimum rate in the SPAN file is zero. A short option's extreme loss margin uses the contract file's percent when that file is loaded, and otherwise the published index or exposure-file percent. Notional is the SPAN underlying price. Delivery margin on a stock derivative is 10, 25, 45, or 70 percent of the archived cash-market daily margin rate from four trading days before expiry through the day before expiry, and the full rate on the expiry day. The quantity is the net shares that expiry would deliver. The total is SPAN margin plus exposure margin plus delivery margin, and the short option premium is included in that total. A book of only long options has a total equal to its delivery margin. Margin benefit compares the separate position totals with the total before delivery margin. Cross-margin benefit is zero.";
 
@@ -138,12 +138,6 @@ fn price_book(
             ));
         }
         for position in &group {
-            if book.exchange == "BSE" && position.contract.kind.is_option() {
-                return Err(format!(
-                    "{} is a BSE option, and the ICCL extreme loss file is applied to futures",
-                    position.symbol
-                ));
-            }
             if position.contract.kind.is_option() && position.quantity.is_sign_negative() {
                 short_option = true;
                 if !commodity.som_is_zero {
@@ -442,6 +436,13 @@ fn contract_option_percent(
     underlying: Decimal,
     expiry: NaiveDate,
 ) -> Result<Decimal, String> {
+    if let Some(percent) =
+        input
+            .contracts
+            .iccl_option_percent(input.product, input.kind, expiry, strike)
+    {
+        return percent;
+    }
     if !input.contracts.is_empty() {
         return input
             .contracts

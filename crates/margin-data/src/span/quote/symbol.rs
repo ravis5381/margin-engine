@@ -457,7 +457,7 @@ pub(super) fn day(symbol: &str, text: &str) -> Result<u32, String> {
     Ok(day)
 }
 
-fn month_from_code(code: char) -> Option<u32> {
+pub(super) fn month_from_code(code: char) -> Option<u32> {
     match code {
         '1'..='9' => {
             let code_byte = u8::try_from(u32::from(code)).ok()?;

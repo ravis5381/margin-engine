@@ -1,7 +1,9 @@
 //! Exposure, contract extreme-loss, and cash-market VaR files that sit beside a SPAN archive.
 
 use super::file::{ContractKind, UNCOMPRESSED_LIMIT, canonical_parts};
-use super::symbol::{MarginPosition, SymbolSpec, expiry_matches, product_year_month};
+use super::symbol::{
+    MONTHS, MarginPosition, SymbolSpec, expiry_matches, month_from_code, product_year_month,
+};
 use crate::zip_safe::{ZipLimits, extract_zip_to_memory};
 use chrono::{Datelike, NaiveDate};
 use flate2::read::GzDecoder;
@@ -144,11 +146,15 @@ pub(super) fn elm_percent(text: &str, row: usize, label: &str) -> Result<Decimal
     Ok(value)
 }
 
+type IcclOptionKey = (String, i32, u32, Option<u32>, ContractKind, Decimal);
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContractElmRates {
     rows: BTreeMap<(String, NaiveDate, ContractKind, Option<Decimal>), Decimal>,
     listed: Vec<ListedContract>,
     monthly_futures: BTreeMap<(String, i32, u32), Decimal>,
+    /// ICCL option rows. The day is absent for a monthly series such as `SENSEX26NOV`.
+    options: BTreeMap<IcclOptionKey, Decimal>,
     iccl: bool,
 }
 
@@ -223,6 +229,7 @@ impl ContractElmRates {
             rows,
             listed,
             monthly_futures: BTreeMap::new(),
+            options: BTreeMap::new(),
             iccl: false,
         })
     }
@@ -240,6 +247,7 @@ impl ContractElmRates {
         let text = std::str::from_utf8(bytes)
             .map_err(|_| "ICCL extreme loss file is not UTF-8".to_owned())?;
         let mut monthly_futures = BTreeMap::new();
+        let mut options = BTreeMap::new();
         let mut rows_seen = 0_usize;
         for (index, line) in text.lines().enumerate() {
             let line = line.trim_end_matches('\r');
@@ -291,7 +299,7 @@ impl ContractElmRates {
                     }
                     monthly_futures.insert(key, total);
                 }
-                "IO" | "SO" => {}
+                "IO" | "SO" => store_iccl_option(&mut options, fields[1].trim(), total)?,
                 other => {
                     return Err(format!(
                         "ICCL extreme loss instrument `{other}` is not IF, SF, IO, or SO"
@@ -306,7 +314,55 @@ impl ContractElmRates {
             rows: BTreeMap::new(),
             listed: Vec::new(),
             monthly_futures,
+            options,
             iccl: true,
+        })
+    }
+
+    pub(super) fn iccl_option_percent(
+        &self,
+        product: &str,
+        kind: ContractKind,
+        expiry: NaiveDate,
+        strike: Decimal,
+    ) -> Option<Result<Decimal, String>> {
+        if !self.iccl {
+            return None;
+        }
+        Some(self.option_rate(product, kind, expiry, strike))
+    }
+
+    pub(super) fn option_rate(
+        &self,
+        product: &str,
+        kind: ContractKind,
+        expiry: NaiveDate,
+        strike: Decimal,
+    ) -> Result<Decimal, String> {
+        let strike = strike.normalize();
+        let year = expiry.year();
+        let month = expiry.month();
+        let dated = (
+            product.to_owned(),
+            year,
+            month,
+            Some(expiry.day()),
+            kind,
+            strike,
+        );
+        if let Some(percent) = self.options.get(&dated) {
+            return Ok(*percent);
+        }
+        let monthly = (product.to_owned(), year, month, None, kind, strike);
+        self.options.get(&monthly).copied().ok_or_else(|| {
+            let right = match kind {
+                ContractKind::Call => "CE",
+                ContractKind::Put => "PE",
+                ContractKind::Future | ContractKind::Stock => "option",
+            };
+            format!(
+                "ICCL extreme loss file has no option rate for {product} {expiry} {strike} {right}"
+            )
         })
     }
 
@@ -660,6 +716,121 @@ fn iccl_product(value: &str) -> bool {
         && value.chars().all(|character| {
             character.is_ascii_alphanumeric() || character == '-' || character == '&'
         })
+}
+
+fn store_iccl_option(
+    options: &mut BTreeMap<IcclOptionKey, Decimal>,
+    symbol: &str,
+    total: Decimal,
+) -> Result<(), String> {
+    let Some((product, year, month, day, kind, strike)) = iccl_option_symbol(symbol) else {
+        return Err(format!(
+            "ICCL extreme loss option `{symbol}` is not a product, expiry, and strike"
+        ));
+    };
+    let key = (product, year, month, day, kind, strike.normalize());
+    if let Some(existing) = options.get(&key)
+        && existing != &total
+    {
+        return Err(format!(
+            "ICCL extreme loss file repeats {symbol} with different percents"
+        ));
+    }
+    options.insert(key, total);
+    Ok(())
+}
+
+fn iccl_option_symbol(
+    symbol: &str,
+) -> Option<(String, i32, u32, Option<u32>, ContractKind, Decimal)> {
+    let (body, kind) = if let Some(body) = symbol.strip_suffix("CE") {
+        (body, ContractKind::Call)
+    } else {
+        (symbol.strip_suffix("PE")?, ContractKind::Put)
+    };
+    if let Some((product, year, month, day, strike)) = shortest_weekly_option(body) {
+        return Some((product, year, month, Some(day), kind, strike));
+    }
+    let (product, year, month, strike) = iccl_monthly_option(body)?;
+    Some((product, year, month, None, kind, strike))
+}
+
+fn shortest_weekly_option(body: &str) -> Option<(String, i32, u32, u32, Decimal)> {
+    let bytes = body.as_bytes();
+    if bytes.len() < 6 {
+        return None;
+    }
+    let mut best: Option<(String, i32, u32, u32, Decimal)> = None;
+    for index in 0..=bytes.len() - 5 {
+        if !bytes[index].is_ascii_digit() || !bytes[index + 1].is_ascii_digit() {
+            continue;
+        }
+        let Some(month) = month_from_code(char::from(bytes[index + 2])) else {
+            continue;
+        };
+        if !bytes[index + 3].is_ascii_digit() || !bytes[index + 4].is_ascii_digit() {
+            continue;
+        }
+        let day = u32::from(bytes[index + 3] - b'0') * 10 + u32::from(bytes[index + 4] - b'0');
+        if !(1..=31).contains(&day) {
+            continue;
+        }
+        let product = &body[..index];
+        if !iccl_product(product) {
+            continue;
+        }
+        let Ok(strike) = Decimal::from_str(&body[index + 5..]) else {
+            continue;
+        };
+        if !strike.is_sign_positive() {
+            continue;
+        }
+        let year = 2000 + i32::from(bytes[index] - b'0') * 10 + i32::from(bytes[index + 1] - b'0');
+        let candidate = (product.to_owned(), year, month, day, strike);
+        match &best {
+            Some((chosen, ..)) if chosen.len() <= product.len() => {}
+            _ => best = Some(candidate),
+        }
+    }
+    best
+}
+
+fn iccl_monthly_option(body: &str) -> Option<(String, i32, u32, Decimal)> {
+    let mut found = None;
+    for (index, month_name) in MONTHS.iter().enumerate() {
+        let mut start = 0;
+        while let Some(relative) = body[start..].find(month_name) {
+            let pos = start + relative;
+            start = pos + month_name.len();
+            if pos < 2 {
+                continue;
+            }
+            let year_text = &body[pos - 2..pos];
+            let product = &body[..pos - 2];
+            let strike_text = &body[pos + month_name.len()..];
+            if year_text.len() != 2
+                || !year_text
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+                || !iccl_product(product)
+            {
+                continue;
+            }
+            let Ok(strike) = Decimal::from_str(strike_text) else {
+                continue;
+            };
+            if !strike.is_sign_positive() {
+                continue;
+            }
+            let year = 2000 + year_text.parse::<i32>().ok()?;
+            let month = u32::try_from(index + 1).ok()?;
+            if found.is_some() {
+                return None;
+            }
+            found = Some((product.to_owned(), year, month, strike));
+        }
+    }
+    found
 }
 
 pub(super) fn published_or_contract(

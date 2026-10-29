@@ -166,12 +166,7 @@ fn choose_span_as_of(
             }
         })?;
         if created.date() != trading_date {
-            return Err(DataError::MarginRejected {
-                detail: format!(
-                    "{} was created at {created}, which is not trading date {trading_date}",
-                    candidate.original_filename
-                ),
-            });
+            continue;
         }
         if created <= trading_datetime {
             eligible.push((created, candidate));
@@ -263,6 +258,25 @@ mod tests {
         assert_eq!(evening.0.original_filename, "nsccl.20261028.s.zip");
         let before_open = choose_span_as_of(&files, stamp("2026-10-28T01:00:00"));
         assert!(matches!(before_open, Err(DataError::MarginNotFound { .. })));
+        let weekend = span_file(
+            "BSERISK20261019-00.ZIP",
+            "dd",
+            "begin_of_day",
+            None,
+            "202610170025",
+        );
+        let monday = span_file(
+            "BSERISK20261019-01.ZIP",
+            "ee",
+            "intraday",
+            Some(1),
+            "202610191107",
+        );
+        let nineteenth = [weekend, monday];
+        let morning = choose_span_as_of(&nineteenth, stamp("2026-10-19T10:00:00"));
+        assert!(matches!(morning, Err(DataError::MarginNotFound { .. })));
+        let midday = choose_span_as_of(&nineteenth, stamp("2026-10-19T12:00:00")).expect("midday");
+        assert_eq!(midday.0.original_filename, "BSERISK20261019-01.ZIP");
         let mut rejected = files;
         rejected[1].publication_status = "rejected".to_owned();
         let blocked = choose_span_as_of(&rejected, afternoon);

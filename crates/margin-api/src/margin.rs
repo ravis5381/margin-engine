@@ -282,7 +282,7 @@ pub struct MarginResponse {
     summary = "Quote margin for a book",
     description = "Returns the margin for one book.\n\n\
 `margin.SPANMargin` is the scanning risk plus the calendar-spread charge, plus a short option premium, minus a long option premium. It is `0` when the long premium covers the scan. `margin.netPremium` is that premium with its sign and is not added again. `margin.totalMargin` is SPAN margin plus extreme loss margin plus delivery margin. A long option book whose premium covers the scan has SPAN `0` and a total equal to its delivery margin. `margin.elm` is the extreme loss margin, the same amount as `margin.exposureMargin`. Additional, tender, special, and pre-expiry margin are `0`. `margin.marginBenefit` is the saving from holding the positions together. `totalPositionMargin` is the sum of the position totals before that saving.\n\n\
-The SPAN file is the latest snapshot published at or before `trading_datetime`. A missing file or contract is an error. A calculated zero is `0`. This quote does not replicate NSE Clearing or ICCL.",
+Each quote downloads SPAN snapshots for that trade date that are not already archived, including a snapshot published later the same day. The quote then uses the latest snapshot whose published time is at or before `trading_datetime`. A missing file or contract is an error. A calculated zero is `0`. This quote does not replicate NSE Clearing or ICCL.",
     request_body(
         content = MarginRequest,
         description = "Exchange, trade time, and one to 32 positions.",
@@ -319,29 +319,22 @@ pub async fn calculate_margin(
         Exchange::Nse => ClearingCorporation::Nscc,
         Exchange::Bse => ClearingCorporation::Iccl,
     };
+    let refresh = match (&state.config, &state.store) {
+        (Some(config), AppStore::Postgres(store)) => Some(match exchange {
+            Exchange::Nse => ensure_nse_margin_files(config, store, trading_datetime.date()).await,
+            Exchange::Bse => ensure_iccl_margin_files(config, store, trading_datetime.date()).await,
+        }),
+        _ => None,
+    };
     let stored = match state
         .store
         .span_margin(exchange, clearing, trading_datetime, &positions)
         .await
     {
-        Err(error) if missing_archive(&error) => {
-            if let (Some(config), AppStore::Postgres(store)) = (&state.config, &state.store)
-                && let Err(error) = match exchange {
-                    Exchange::Nse => {
-                        ensure_nse_margin_files(config, store, trading_datetime.date()).await
-                    }
-                    Exchange::Bse => {
-                        ensure_iccl_margin_files(config, store, trading_datetime.date()).await
-                    }
-                }
-            {
-                return download_error(error);
-            }
-            state
-                .store
-                .span_margin(exchange, clearing, trading_datetime, &positions)
-                .await
-        }
+        Err(error) if missing_archive(&error) => match refresh {
+            Some(Err(download)) => return download_error(download),
+            _ => Err(error),
+        },
         other => other,
     };
     match stored {

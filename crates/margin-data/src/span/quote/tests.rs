@@ -1,5 +1,5 @@
 use super::{
-    CashMarginRates, ContractElmRates, ExposureRates, MarginPosition, QuoteBuilder,
+    CashMarginRates, ContractElmRates, ContractKind, ExposureRates, MarginPosition, QuoteBuilder,
     SpanMarginQuote, parse_span_index, quote_span_xml,
 };
 use chrono::NaiveDate;
@@ -691,4 +691,165 @@ fn iccl_extreme_loss_symbols_may_contain_a_hyphen_or_ampersand() {
         rates.monthly_future("NAM-INDIA", october),
         Some(amount("1.00"))
     );
+    let options = ContractElmRates::parse_iccl_csv(
+        b"1,SENSEX26OCT74000CE,IO,2.00,0.00,2.00\n\
+          2,SENSEX26NOV75000PE,IO,2.00,0.00,2.00\n\
+          3,SENSEX26N0573000CE,IO,3.00,0.00,3.00\n\
+          4,SENSEX26NOV73000CE,IO,2.00,0.00,2.00\n\
+          5,CANBK26OCT107.5CE,SO,4.00,0.00,4.00\n\
+          6,BAJAJ-AUTO26OCT320.75PE,SO,5.00,0.00,5.00\n\
+          7,NIFTY26N0320850PE,IO,2.00,0.00,2.00\n",
+    )
+    .expect("option symbols");
+    let october_expiry = NaiveDate::from_ymd_opt(2026, 10, 29).expect("october");
+    let november = NaiveDate::from_ymd_opt(2026, 11, 26).expect("november");
+    let november_week = NaiveDate::from_ymd_opt(2026, 11, 5).expect("week");
+    assert_eq!(
+        options
+            .option_rate(
+                "SENSEX",
+                ContractKind::Call,
+                october_expiry,
+                amount("74000")
+            )
+            .expect("october call"),
+        amount("2.00")
+    );
+    assert_eq!(
+        options
+            .option_rate("SENSEX", ContractKind::Put, november, amount("75000"))
+            .expect("november put"),
+        amount("2.00")
+    );
+    assert_eq!(
+        options
+            .option_rate("SENSEX", ContractKind::Call, november_week, amount("73000"))
+            .expect("weekly call"),
+        amount("3.00")
+    );
+    assert_eq!(
+        options
+            .option_rate("SENSEX", ContractKind::Call, november, amount("73000"))
+            .expect("monthly call"),
+        amount("2.00")
+    );
+    assert_eq!(
+        options
+            .option_rate("CANBK", ContractKind::Call, october_expiry, amount("107.5"))
+            .expect("decimal strike"),
+        amount("4.00")
+    );
+    assert_eq!(
+        options
+            .option_rate(
+                "BAJAJ-AUTO",
+                ContractKind::Put,
+                october_expiry,
+                amount("320.75")
+            )
+            .expect("hyphen product"),
+        amount("5.00")
+    );
+    assert_eq!(
+        options
+            .option_rate(
+                "NIFTY",
+                ContractKind::Put,
+                NaiveDate::from_ymd_opt(2026, 11, 3).expect("weekly"),
+                amount("20850")
+            )
+            .expect("shortest product"),
+        amount("2.00")
+    );
+    let missing = options
+        .option_rate("SENSEX", ContractKind::Call, november, amount("74000"))
+        .expect_err("missing");
+    assert!(missing.contains("no option rate"), "{missing}");
+}
+
+#[test]
+fn a_bse_sensex_option_uses_the_iccl_option_percent_and_the_underlying_price() {
+    let xml = r#"<spanFile>
+<pointInTime><date>20261028</date></pointInTime>
+<exchange><exch>BSE</exch></exchange>
+<phyPf><pfCode>BSX</pfCode><priceMeth>IDX</priceMeth>
+<phy><pe>000000</pe><p>85106.81</p><cvf>1</cvf><sc>1</sc>
+<ra><r>1</r><a>0</a><a>0</a></ra></phy></phyPf>
+<oopPf><pfCode>BSXOPT</pfCode><priceMeth>IDX</priceMeth>
+<series><pe>20261029</pe><cvf>1</cvf><sc>1</sc>
+<opt><o>C</o><k>74000</k><p>12.5</p>
+<ra><r>1</r><a>-1</a><a>4</a></ra></opt>
+</series>
+<series><pe>20261105</pe><cvf>1</cvf><sc>1</sc>
+<opt><o>C</o><k>73000</k><p>1</p>
+<ra><r>1</r><a>-1</a><a>4</a></ra></opt>
+</series>
+</oopPf>
+<ccDef><cc>BSX</cc><name>BSE 30 SENSEX</name>
+<riskExponent>0</riskExponent><cmbMeth>NONE</cmbMeth>
+<pfLink><pfCode>BSX</pfCode><pfType>PHY</pfType></pfLink>
+<pfLink><pfCode>BSXOPT</pfCode><pfType>OOP</pfType></pfLink>
+<somTiers><tier><tn>0</tn><rate><r>1</r><val>0</val></rate></tier></somTiers>
+</ccDef>
+</spanFile>"#;
+    let rates = ContractElmRates::parse_iccl_csv(
+        b"1,SENSEX26OCT74000CE,IO,2.00,0.00,2.00\n\
+          2,SENSEX26N0573000CE,IO,3.00,0.00,3.00\n",
+    )
+    .expect("elm");
+    let short_call = quote_span_xml(
+        xml.as_bytes(),
+        date(),
+        &[position("BSE:SENSEX:2026-10-29:74000:CE", "-10")],
+        &ExposureRates::none(),
+        &rates,
+        &CashMarginRates::default(),
+    )
+    .expect("october call");
+    assert_eq!(
+        short_call.lines[0].canonical,
+        "BSE:SENSEX:2026-10-29:74000:CE"
+    );
+    assert_eq!(short_call.scanning_risk, amount("10"));
+    assert_eq!(short_call.extreme_loss_margin, amount("17021.36"));
+    assert_eq!(short_call.lines[0].elm_percent, amount("2.00"));
+    assert_eq!(short_call.premium, amount("-125"));
+    assert_eq!(short_call.delivery_margin, amount("0"));
+
+    let weekly = quote_span_xml(
+        xml.as_bytes(),
+        date(),
+        &[position("BSE:SENSEX:2026-11-05:73000:CE", "-10")],
+        &ExposureRates::none(),
+        &rates,
+        &CashMarginRates::default(),
+    )
+    .expect("weekly");
+    assert_eq!(weekly.extreme_loss_margin, amount("25532.04"));
+    assert_eq!(weekly.lines[0].elm_percent, amount("3.00"));
+
+    let long_call = quote_span_xml(
+        xml.as_bytes(),
+        date(),
+        &[position("BSE:SENSEX:2026-10-29:74000:CE", "10")],
+        &ExposureRates::none(),
+        &rates,
+        &CashMarginRates::default(),
+    )
+    .expect("long call");
+    assert_eq!(long_call.extreme_loss_margin, amount("0"));
+    assert_eq!(long_call.total_margin, amount("0"));
+
+    let weekly_only = ContractElmRates::parse_iccl_csv(b"2,SENSEX26N0573000CE,IO,3.00,0.00,3.00\n")
+        .expect("weekly only");
+    let missing = quote_span_xml(
+        xml.as_bytes(),
+        date(),
+        &[position("BSE:SENSEX:2026-10-29:74000:CE", "-10")],
+        &ExposureRates::none(),
+        &weekly_only,
+        &CashMarginRates::default(),
+    )
+    .expect_err("missing strike");
+    assert!(missing.contains("no option rate"), "{missing}");
 }
