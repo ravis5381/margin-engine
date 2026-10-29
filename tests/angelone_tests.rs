@@ -636,13 +636,27 @@ async fn session_2026_10_28_matches_captured_angel_one_replies() {
         let body = format!(
             r#"{{"exchange":"{exchange}","trading_datetime":"{trading_datetime}","positions":{positions}}}"#
         );
-        let actual = quote(&state, &body).await;
+        let (status, actual) = send(&state, &body).await;
+        if status == StatusCode::NOT_FOUND && span_archive_missing(&actual) {
+            eprintln!(
+                "SPAN files for {trading_datetime} are not archived; skipping Angel One reply test"
+            );
+            return;
+        }
+        assert_eq!(status, StatusCode::OK, "{name}: {actual}");
         let expected: serde_json::Value = serde_json::from_str(expected).expect(name);
         assert_eq!(actual, expected, "{name}");
     }
 }
 
-async fn quote(state: &AppState, body: &str) -> serde_json::Value {
+fn span_archive_missing(body: &serde_json::Value) -> bool {
+    body["error"]["code"] == "span_file_not_found"
+        && body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no official SPAN file is archived"))
+}
+
+async fn send(state: &AppState, body: &str) -> (StatusCode, serde_json::Value) {
     let response = router(state.clone())
         .oneshot(
             Request::builder()
@@ -661,7 +675,6 @@ async fn quote(state: &AppState, body: &str) -> serde_json::Value {
         .await
         .expect("body")
         .to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-    assert_eq!(status, StatusCode::OK, "{json}");
-    json
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
 }
