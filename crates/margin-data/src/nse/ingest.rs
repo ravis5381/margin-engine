@@ -115,9 +115,17 @@ pub async fn ensure_nse_margin_files(
             "contract_master_gzip",
         )
         .await?
-        && let Err(error) = archive_contract_master(config, store, &client, trading_date).await
     {
-        return Err(error);
+        match archive_contract_master(config, store, &client, trading_date).await {
+            Ok(()) => {}
+            Err(error) if file_not_published(&error) => {
+                tracing::info!(
+                    %trading_date,
+                    "contract master is not published for this date"
+                );
+            }
+            Err(error) => return Err(error),
+        }
     }
     if !store
         .span_is_archived(
@@ -151,6 +159,7 @@ async fn archive_cash_var(
         match download_cash_var(client, &config.download, trading_date, batch).await {
             Ok(downloaded) => {
                 let rejection = CashMarginRates::parse(&downloaded.bytes, trading_date).err();
+                let parsed = rejection.is_none();
                 let receipt = archive_auxiliary(
                     store.pool(),
                     AuxiliaryArchiveRequest {
@@ -167,12 +176,12 @@ async fn archive_cash_var(
                     },
                 )
                 .await?;
-                if !receipt.accepted {
-                    return Err(DataError::ArchiveRejected {
-                        detail: receipt.note,
-                    });
+                if receipt.accepted || (parsed && receipt.disposition == "duplicate") {
+                    return Ok(());
                 }
-                return Ok(());
+                return Err(DataError::ArchiveRejected {
+                    detail: receipt.note,
+                });
             }
             Err(error) if file_not_published(&error) => missing = Some(error),
             Err(error) => return Err(error),

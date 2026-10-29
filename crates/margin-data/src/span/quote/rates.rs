@@ -546,9 +546,11 @@ impl CashMarginRates {
             let fields: Vec<&str> = line.split(',').map(str::trim).collect();
             match fields.first().copied() {
                 Some("10") if declared.is_none() => {
-                    if fields.len() != 5 {
+                    // Begin-of-day files publish 10,date,0.00,count. Later batches insert the batch number before the count.
+                    if fields.len() != 4 && fields.len() != 5 {
                         return Err(format!(
-                            "cash-market VaR file row {row} does not have 5 control fields"
+                            "cash-market VaR file row {row} control record has {} fields",
+                            fields.len()
                         ));
                     }
                     if fields[1] != expected_date {
@@ -557,7 +559,7 @@ impl CashMarginRates {
                             fields[1]
                         ));
                     }
-                    declared = Some(fields[4].parse::<usize>().map_err(|_| {
+                    declared = Some(fields[fields.len() - 1].parse::<usize>().map_err(|_| {
                         format!("cash-market VaR file row {row} record count is not a number")
                     })?);
                 }

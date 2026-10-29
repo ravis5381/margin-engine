@@ -1,5 +1,7 @@
 //! NSCCL margin quote. The SPAN array is shared. Exposure, contract ELM,
-//! the contract master, and cash VaR are the NSE files for the trade date.
+//! and cash VaR are the NSE files for the trade date. The contract master is
+//! that date's file, or the latest earlier archived file when NSE has not
+//! published one yet.
 
 use crate::DataError;
 use crate::nse::contract_master::ContractMaster;

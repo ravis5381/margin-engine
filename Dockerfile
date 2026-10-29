@@ -1,9 +1,9 @@
-FROM rust:1-bookworm AS build
+FROM --platform=linux/amd64 rust:1-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release --bin margin-engine
 
-FROM debian:bookworm-slim
+FROM --platform=linux/amd64 debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*

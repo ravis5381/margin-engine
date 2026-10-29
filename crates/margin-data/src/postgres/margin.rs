@@ -165,7 +165,8 @@ fn choose_span_as_of(
                 detail: format!("{}: {detail}", candidate.original_filename),
             }
         })?;
-        if created.date() != trading_date {
+        let previous_day = trading_date.pred_opt();
+        if created.date() != trading_date && previous_day != Some(created.date()) {
             continue;
         }
         if created <= trading_datetime {
@@ -277,6 +278,15 @@ mod tests {
         assert!(matches!(morning, Err(DataError::MarginNotFound { .. })));
         let midday = choose_span_as_of(&nineteenth, stamp("2026-10-19T12:00:00")).expect("midday");
         assert_eq!(midday.0.original_filename, "BSERISK20261019-01.ZIP");
+        let overnight = [span_file(
+            "nsccl.20261029.i1.zip",
+            "ff",
+            "begin_of_day",
+            None,
+            "202610282238",
+        )];
+        let open = choose_span_as_of(&overnight, stamp("2026-10-29T09:35:00")).expect("open");
+        assert_eq!(open.0.original_filename, "nsccl.20261029.i1.zip");
         let mut rejected = files;
         rejected[1].publication_status = "rejected".to_owned();
         let blocked = choose_span_as_of(&rejected, afternoon);

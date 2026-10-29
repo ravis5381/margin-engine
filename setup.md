@@ -13,11 +13,13 @@ the first password.
 
 From the repository root:
 
+The other machine is `linux/amd64`. This Mac builds `linux/arm64` unless BuildKit is asked for that platform. The legacy builder keeps the ARM base image and then fails with `does not provide the specified platform (linux/amd64)`. An arm64 image exits with `exec format error` on the other host.
+
 ```bash
 cd /Users/ravisingh/Documents/margin_calculator
 
-docker build -t margin-engine:0.1.0 .
-docker pull postgres:16
+docker buildx build --platform linux/amd64 --pull --load -t margin-engine:0.1.0 .
+docker pull --platform linux/amd64 postgres:16
 
 mkdir -p dist
 docker save margin-engine:0.1.0 postgres:16 | gzip > dist/margin-engine-0.1.0.tar.gz

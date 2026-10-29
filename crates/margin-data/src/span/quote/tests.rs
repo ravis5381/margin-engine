@@ -432,6 +432,15 @@ fn delivery_margin_uses_the_cash_rate_on_the_net_deliverable_shares() {
         date(),
     )
     .expect("var");
+    let begin = CashMarginRates::parse(
+        b"10,28102026,0.00,0000001\n20,RELIANCE,EQ,INE002A01018,8.55,0.00,9.00,3.50,0.00,12.50\n",
+        date(),
+    )
+    .expect("begin-of-day var");
+    assert_eq!(
+        begin.daily_percent("RELIANCE").expect("rate"),
+        amount("12.50")
+    );
     let quote = quote_span_xml(
         inside.as_bytes(),
         date(),

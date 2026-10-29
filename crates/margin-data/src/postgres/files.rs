@@ -123,15 +123,66 @@ impl PgStore {
         clearing: ClearingCorporation,
         trading_date: NaiveDate,
     ) -> Result<Vec<u8>, DataError> {
+        let rows = self
+            .auxiliary_rows(
+                exchange,
+                clearing,
+                trading_date,
+                "contract_master_gzip",
+                "container_checked",
+            )
+            .await?;
+        if !rows.is_empty() {
+            return one_auxiliary_hash(
+                rows,
+                format!("more than one contract master hash is archived for {trading_date}"),
+            );
+        }
+        let Some(previous) = self
+            .latest_auxiliary_date_before(exchange, clearing, trading_date, "contract_master_gzip")
+            .await?
+        else {
+            return Err(DataError::MarginRejected {
+                detail: format!(
+                    "no contract master is archived for {trading_date}, and no earlier contract master is archived"
+                ),
+            });
+        };
+        tracing::info!(
+            %trading_date,
+            %previous,
+            "contract master for this date is not archived; using the previous file"
+        );
         self.one_auxiliary(
             exchange,
             clearing,
-            trading_date,
+            previous,
             "contract_master_gzip",
-            format!("no contract master is archived for {trading_date}"),
-            format!("more than one contract master hash is archived for {trading_date}"),
+            format!("no contract master is archived for {previous}"),
+            format!("more than one contract master hash is archived for {previous}"),
         )
         .await
+    }
+
+    async fn latest_auxiliary_date_before(
+        &self,
+        exchange: Exchange,
+        clearing: ClearingCorporation,
+        trading_date: NaiveDate,
+        kind: &str,
+    ) -> Result<Option<NaiveDate>, DataError> {
+        sqlx::query_scalar(
+            "SELECT MAX(trading_date) FROM official_auxiliary_files \
+             WHERE exchange = $1 AND clearing_corporation = $2 AND kind = $3 \
+               AND check_status = 'container_checked' AND trading_date < $4",
+        )
+        .bind(exchange.code())
+        .bind(clearing.code())
+        .bind(kind)
+        .bind(trading_date)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db_error_message)
     }
 
     pub(crate) async fn cash_var_file(
@@ -140,7 +191,7 @@ impl PgStore {
         clearing: ClearingCorporation,
         trading_date: NaiveDate,
     ) -> Result<Option<Vec<u8>>, DataError> {
-        let rows = self
+        let checked = self
             .auxiliary_rows(
                 exchange,
                 clearing,
@@ -149,6 +200,12 @@ impl PgStore {
                 "container_checked",
             )
             .await?;
+        let rows = if checked.is_empty() {
+            self.auxiliary_rows(exchange, clearing, trading_date, "cash_var_dat", "rejected")
+                .await?
+        } else {
+            checked
+        };
         if rows.is_empty() {
             return Ok(None);
         }
