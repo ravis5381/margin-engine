@@ -68,7 +68,7 @@ pub fn canonical_contract_symbol(
                 strike.normalize()
             ))
         }
-        _ => Err("right must be FUT, C, P, CE, PE, or EQ".to_owned()),
+        _ => Err("instrumentType must be FUT, C, P, CE, PE, or EQ".to_owned()),
     }
 }
 
@@ -84,9 +84,6 @@ fn require_expiry(expiry: Option<&str>) -> Result<NaiveDate, String> {
 pub(super) fn parse_positions(positions: &[MarginPosition]) -> Result<Vec<SymbolSpec>, String> {
     if positions.is_empty() {
         return Err("at least one position is required".to_owned());
-    }
-    if positions.len() > 32 {
-        return Err("a margin quote accepts at most 32 positions".to_owned());
     }
     let mut seen_symbols = BTreeSet::new();
     let mut specs = Vec::with_capacity(positions.len());

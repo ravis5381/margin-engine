@@ -31,7 +31,7 @@ This build does not replicate NSE Clearing or ICCL.
   cross margin is left out. Reported amounts are rounded half away from zero
   to paise. The contract file identifies the expiry. An ambiguous symbol must
   be sent as a canonical contract such as `NSE:RELIANCE:2026-11-26:FUT`, or as
-  underlying `RELIANCE`, expiry `2026-11-26`, and right `FUT`. An empty book, a
+  underlying `RELIANCE`, expiry `2026-11-26`, and instrumentType `FUT`. An empty book, a
   zero quantity, a repeated symbol, a non-positive option strike, and a
   position that sends both a symbol and those fields are rejected before the
   archive is read. `POST /api/v1/instruments/canonical` returns that symbol

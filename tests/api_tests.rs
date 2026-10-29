@@ -173,6 +173,9 @@ async fn openapi_documents_published_routes_and_swagger_ui_loads() {
     assert!(!paths.contains_key("/api/v1/data/status"));
     assert!(!paths.contains_key("/api/v1/risk-data/datasets"));
     assert_eq!(paths.len(), 2);
+    let margin_examples = &body["paths"]["/api/v1/margin/calculate"]["post"]["requestBody"]["content"]["application/json"]["examples"];
+    assert!(margin_examples.get("Contract fields").is_some());
+    assert!(margin_examples.get("Symbol").is_some());
     let margin_schema = &body["components"]["schemas"]["MarginResponse"];
     assert!(margin_schema["properties"].get("positionMargin").is_some());
     assert!(margin_schema["properties"].get("margin").is_some());
@@ -297,7 +300,7 @@ async fn margin_requests_are_validated_before_the_archive_is_read() {
     );
 
     let (status, body) = post_margin(
-        r#"{"exchange":"BSE","trading_datetime":"2026-10-28T16:00:00+05:30","positions":[{"underlying":"SENSEX","expiry":"2026-10-29","right":"FUT","quantity":"-1"}]}"#,
+        r#"{"exchange":"BSE","trading_datetime":"2026-10-28T16:00:00+05:30","positions":[{"underlying":"SENSEX","expiry":"2026-10-29","instrumentType":"FUT","quantity":"-1"}]}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -312,42 +315,42 @@ async fn margin_requests_are_validated_before_the_archive_is_read() {
     assert!(request_error(&body).contains("YYYY-MM-DD"), "{body}");
 
     let (status, body) = post_margin(
-        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"symbol":"NIFTY26NOVFUT","underlying":"NIFTY","expiry":"2026-11-23","right":"FUT","quantity":"-65"}]}"#,
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"symbol":"NIFTY26NOVFUT","underlying":"NIFTY","expiry":"2026-11-23","instrumentType":"FUT","quantity":"-65"}]}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(request_error(&body).contains("not both"), "{body}");
 
     let (status, body) = post_margin(
-        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-23","strike":"26000","right":"FUT","quantity":"-65"}]}"#,
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-23","strike":"26000","instrumentType":"FUT","quantity":"-65"}]}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(request_error(&body).contains("no strike"), "{body}");
 
     let (status, body) = post_margin(
-        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-03","right":"C","quantity":"-65"}]}"#,
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-03","instrumentType":"C","quantity":"-65"}]}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(request_error(&body).contains("strike"), "{body}");
 
     let (status, body) = post_margin(
-        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-03","strike":"0","right":"PE","quantity":"-65"}]}"#,
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-03","strike":"0","instrumentType":"PE","quantity":"-65"}]}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(request_error(&body).contains("positive"), "{body}");
 
     let (status, body) = post_margin(
-        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"RELIANCE","expiry":"2026-11-26","right":"EQ","quantity":"1"}]}"#,
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"RELIANCE","expiry":"2026-11-26","instrumentType":"EQ","quantity":"1"}]}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(request_error(&body).contains("physical stock"), "{body}");
 
     let (status, body) = post_margin(
-        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-23","right":"FUT","quantity":"0"}]}"#,
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-23","instrumentType":"FUT","quantity":"0"}]}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -369,7 +372,7 @@ async fn margin_requests_are_validated_before_the_archive_is_read() {
     assert!(!request_error(&body).contains("memory store"), "{body}");
 
     let (status, body) = post_margin(
-        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-23","right":"FUT","quantity":"-65"}]}"#,
+        r#"{"exchange":"NSE","trading_datetime":"2026-10-28T14:30:00+05:30","positions":[{"underlying":"NIFTY","expiry":"2026-11-23","instrumentType":"FUT","quantity":"-65"}]}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -381,7 +384,7 @@ async fn margin_requests_are_validated_before_the_archive_is_read() {
 async fn canonical_instrument_is_built_from_the_contract_fields() {
     let (status, body) = post_margin_path(
         "/api/v1/instruments/canonical",
-        r#"{"exchange":"NSE","underlying":"nifty","expiry":"2026-11-23","right":"FUT"}"#,
+        r#"{"exchange":"NSE","underlying":"nifty","expiry":"2026-11-23","instrumentType":"FUT"}"#,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -389,12 +392,12 @@ async fn canonical_instrument_is_built_from_the_contract_fields() {
     assert_eq!(body["underlying"], "NIFTY");
     assert_eq!(body["expiry"], "2026-11-23");
     assert!(body["strike"].is_null());
-    assert_eq!(body["right"], "FUT");
+    assert_eq!(body["instrumentType"], "FUT");
     assert!(body.get("total_margin").is_none());
 
     let (status, body) = post_margin_path(
         "/api/v1/instruments/canonical",
-        r#"{"exchange":"BSE","underlying":"SENSEX","expiry":"2026-10-29","right":"FUT"}"#,
+        r#"{"exchange":"BSE","underlying":"SENSEX","expiry":"2026-10-29","instrumentType":"FUT"}"#,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -402,17 +405,17 @@ async fn canonical_instrument_is_built_from_the_contract_fields() {
 
     let (status, body) = post_margin_path(
         "/api/v1/instruments/canonical",
-        r#"{"exchange":"NSE","underlying":"NIFTY","expiry":"2026-11-03","strike":"26000.00","right":"c"}"#,
+        r#"{"exchange":"NSE","underlying":"NIFTY","expiry":"2026-11-03","strike":"26000.00","instrumentType":"c"}"#,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["canonical"], "NSE:NIFTY:2026-11-03:26000:CE");
     assert_eq!(body["strike"], "26000");
-    assert_eq!(body["right"], "CE");
+    assert_eq!(body["instrumentType"], "CE");
 
     let (status, body) = post_margin_path(
         "/api/v1/instruments/canonical",
-        r#"{"exchange":"NSE","underlying":"RELIANCE","right":"EQ"}"#,
+        r#"{"exchange":"NSE","underlying":"RELIANCE","instrumentType":"EQ"}"#,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -421,7 +424,7 @@ async fn canonical_instrument_is_built_from_the_contract_fields() {
 
     let (status, body) = post_margin_path(
         "/api/v1/instruments/canonical",
-        r#"{"exchange":"NSE","underlying":"NIFTY","expiry":"2026-11-23","strike":"26000","right":"FUT"}"#,
+        r#"{"exchange":"NSE","underlying":"NIFTY","expiry":"2026-11-23","strike":"26000","instrumentType":"FUT"}"#,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);

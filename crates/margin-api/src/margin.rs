@@ -56,9 +56,6 @@ fn prepare_book(
     if request.positions.is_empty() {
         return Err("at least one position is required".to_owned());
     }
-    if request.positions.len() > 32 {
-        return Err("a margin quote accepts at most 32 positions".to_owned());
-    }
     let mut positions = Vec::with_capacity(request.positions.len());
     for position in &request.positions {
         let symbol = position_symbol(exchange, position)?;
@@ -77,7 +74,7 @@ fn position_symbol(exchange: Exchange, position: &MarginPositionRequest) -> Resu
     let underlying = filled(&position.underlying);
     let expiry = filled(&position.expiry);
     let strike = filled(&position.strike);
-    let right = filled(&position.right);
+    let right = filled(&position.instrument_type);
     let structured =
         underlying.is_some() || expiry.is_some() || strike.is_some() || right.is_some();
     let symbol = filled(&position.symbol);
@@ -92,24 +89,34 @@ fn position_symbol(exchange: Exchange, position: &MarginPositionRequest) -> Resu
             underlying.ok_or_else(|| "underlying must be the product code".to_owned())?,
             expiry,
             strike,
-            right.ok_or_else(|| "right must be FUT, C, P, CE, PE, or EQ".to_owned())?,
+            right.ok_or_else(|| "instrumentType must be FUT, C, P, CE, PE, or EQ".to_owned())?,
         ),
     }
 }
 
 #[derive(Deserialize, ToSchema)]
 #[schema(
-    description = "One NSE or BSE book valued at a trade time. The example is a short 65-unit NIFTY November future. A BSE book uses underlying SENSEX.",
-    example = json!({
-        "exchange": "NSE",
-        "trading_datetime": "2026-10-28T14:30:00+05:30",
-        "positions": [{
-            "underlying": "NIFTY",
-            "expiry": "2026-11-23",
-            "right": "FUT",
-            "quantity": "-65"
-        }]
-    })
+    description = "One NSE or BSE book valued at a trade time. A position sends contract fields or a symbol.",
+    examples(
+        json!({
+            "exchange": "NSE",
+            "trading_datetime": "2026-10-28T14:30:00+05:30",
+            "positions": [{
+                "underlying": "NIFTY",
+                "expiry": "2026-11-23",
+                "instrumentType": "FUT",
+                "quantity": "-65"
+            }]
+        }),
+        json!({
+            "exchange": "NSE",
+            "trading_datetime": "2026-10-28T14:30:00+05:30",
+            "positions": [{
+                "symbol": "NSE:NIFTY:2026-11-23:FUT",
+                "quantity": "-65"
+            }]
+        })
+    )
 )]
 pub struct MarginRequest {
     /// `NSE` or `BSE`. `BSE` quotes SENSEX from the ICCL SPAN file.
@@ -118,13 +125,14 @@ pub struct MarginRequest {
     /// Trade time. No offset means India Standard Time. `2026-10-28T14:30:00+05:30` and `2026-10-28T14:30:00` are the same moment.
     #[schema(example = "2026-10-28T14:30:00+05:30")]
     trading_datetime: String,
-    /// One to 32 positions. Symbols are matched case-insensitively and must be unique.
+    /// The positions in the book. Symbols are matched case-insensitively and must be unique.
     positions: Vec<MarginPositionRequest>,
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 #[schema(
-    description = "One position. Send `symbol`, or send `underlying` with `right` and the fields that right requires. Sending both is rejected."
+    description = "One position. Send `symbol`, or send `underlying` with `instrumentType` and the fields that type requires. Sending both is rejected."
 )]
 pub struct MarginPositionRequest {
     /// Market symbol or canonical symbol, such as `NIFTY26NOVFUT` or `NSE:NIFTY:2026-11-23:FUT`. Omit when the contract fields are set.
@@ -146,7 +154,7 @@ pub struct MarginPositionRequest {
     /// `FUT`, `C`, `P`, `CE`, `PE`, or `EQ`. `C` and `P` are stored as `CE` and `PE`.
     #[schema(example = "FUT")]
     #[serde(default)]
-    right: Option<String>,
+    instrument_type: Option<String>,
     /// Signed quantity in units. `-65` is short 65 units. Zero is rejected.
     #[schema(example = "-65")]
     quantity: String,
@@ -280,22 +288,40 @@ pub struct MarginResponse {
     tag = "margin",
     operation_id = "calculateMargin",
     summary = "Quote margin for a book",
-    description = "Returns the margin for one book.\n\n\
+    description = "Returns the margin for one book. Each position is either the contract fields or a `symbol`.\n\n\
 `margin.SPANMargin` is the scanning risk plus the calendar-spread charge, plus a short option premium, minus a long option premium. It is `0` when the long premium covers the scan. `margin.netPremium` is that premium with its sign and is not added again. `margin.totalMargin` is SPAN margin plus extreme loss margin plus delivery margin. A long option book whose premium covers the scan has SPAN `0` and a total equal to its delivery margin. `margin.elm` is the extreme loss margin, the same amount as `margin.exposureMargin`. Additional, tender, special, and pre-expiry margin are `0`. `margin.marginBenefit` is the saving from holding the positions together. `totalPositionMargin` is the sum of the position totals before that saving.\n\n\
 Each quote downloads SPAN snapshots for that trade date that are not already archived, including a snapshot published later the same day. The quote then uses the latest snapshot whose published time is at or before `trading_datetime`. A missing file or contract is an error. A calculated zero is `0`. This quote does not replicate NSE Clearing or ICCL.",
     request_body(
         content = MarginRequest,
-        description = "Exchange, trade time, and one to 32 positions.",
-        example = json!({
-            "exchange": "NSE",
-            "trading_datetime": "2026-10-28T14:30:00+05:30",
-            "positions": [{
-                "underlying": "NIFTY",
-                "expiry": "2026-11-23",
-                "right": "FUT",
-                "quantity": "-65"
-            }]
-        })
+        description = "Exchange, trade time, and the positions. A position sends contract fields or a symbol.",
+        examples(
+            ("Contract fields" = (
+                summary = "Contract fields",
+                description = "Underlying, expiry, and instrumentType.",
+                value = json!({
+                    "exchange": "NSE",
+                    "trading_datetime": "2026-10-28T14:30:00+05:30",
+                    "positions": [{
+                        "underlying": "NIFTY",
+                        "expiry": "2026-11-23",
+                        "instrumentType": "FUT",
+                        "quantity": "-65"
+                    }]
+                })
+            )),
+            ("Symbol" = (
+                summary = "Symbol",
+                description = "Canonical symbol in place of the contract fields.",
+                value = json!({
+                    "exchange": "NSE",
+                    "trading_datetime": "2026-10-28T14:30:00+05:30",
+                    "positions": [{
+                        "symbol": "NSE:NIFTY:2026-11-23:FUT",
+                        "quantity": "-65"
+                    }]
+                })
+            ))
+        )
     ),
     responses(
         (status = 200, description = "Margin quote for the SPAN file current at the trade time", body = MarginResponse),
@@ -513,13 +539,14 @@ fn missing_archive(error: &DataError) -> bool {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 #[schema(
     description = "Contract identity. A future has an expiry and no strike. An option has an expiry and a positive strike. `EQ` is a physical stock and has neither.",
     example = json!({
         "exchange": "NSE",
         "underlying": "NIFTY",
         "expiry": "2026-11-23",
-        "right": "FUT"
+        "instrumentType": "FUT"
     })
 )]
 pub struct CanonicalInstrumentRequest {
@@ -539,10 +566,11 @@ pub struct CanonicalInstrumentRequest {
     strike: Option<String>,
     /// `FUT`, `C`, `P`, `CE`, `PE`, or `EQ`.
     #[schema(example = "FUT")]
-    right: String,
+    instrument_type: String,
 }
 
 #[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 #[schema(
     description = "Canonical symbol and the fields used to build it. `C` and `P` are returned as `CE` and `PE`.",
     example = json!({
@@ -550,7 +578,7 @@ pub struct CanonicalInstrumentRequest {
         "exchange": "NSE",
         "underlying": "NIFTY",
         "expiry": "2026-11-23",
-        "right": "FUT"
+        "instrumentType": "FUT"
     })
 )]
 pub struct CanonicalInstrumentResponse {
@@ -565,7 +593,7 @@ pub struct CanonicalInstrumentResponse {
     /// Strike in rupees. Present for an option.
     strike: Option<String>,
     /// `FUT`, `CE`, `PE`, or `EQ`.
-    right: String,
+    instrument_type: String,
 }
 
 #[utoipa::path(
@@ -574,9 +602,9 @@ pub struct CanonicalInstrumentResponse {
     tag = "instruments",
     operation_id = "canonicalInstrument",
     summary = "Build a canonical symbol",
-    description = "Builds the symbol used by the margin call.\n\n\
-A future is `NSE:NIFTY:2026-11-23:FUT`. An option adds the strike, as in `NSE:NIFTY:2026-11-03:26000:CE`. A stock is `NSE:RELIANCE:EQ`. `C` and `P` come back as `CE` and `PE`.\n\n\
-This call does not read a file and does not return a margin. Send `canonical` as `symbol` on the margin call.",
+    description = "Builds the canonical symbol from the exchange, product, expiry, strike, and instrumentType.\n\n\
+A future is `NSE:NIFTY:2026-11-23:FUT`. An option adds the strike, as in `NSE:NIFTY:2026-11-03:26000:CE`. A stock is `NSE:RELIANCE:EQ`. `C` and `P` are returned as `CE` and `PE`.\n\n\
+Pass the returned `canonical` value as `symbol` on the margin call.",
     request_body = CanonicalInstrumentRequest,
     responses(
         (status = 200, description = "Canonical instrument", body = CanonicalInstrumentResponse),
@@ -599,7 +627,7 @@ pub async fn canonical_instrument(Json(request): Json<CanonicalInstrumentRequest
         &request.underlying,
         filled(&request.expiry),
         filled(&request.strike),
-        &request.right,
+        &request.instrument_type,
     ) {
         Ok(canonical) => canonical,
         Err(detail) => {
@@ -626,7 +654,7 @@ fn instrument_response(canonical: String) -> CanonicalInstrumentResponse {
         underlying: parts.get(1).unwrap_or(&"").to_string(),
         expiry,
         strike,
-        right: right.to_owned(),
+        instrument_type: right.to_owned(),
         canonical,
     }
 }

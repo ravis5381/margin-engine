@@ -37,9 +37,9 @@ units. Monthly symbols are `PRODUCTYYMMMFUT` and `PRODUCTYYMMMSTRIKECE` or
 with month codes `1`–`9`, `O`, `N`, and `D`. A physical stock is the product
 code. The contract-wise ELM file identifies the contract. Each returned
 line includes a canonical symbol built from the exchange, underlying, expiry,
-and right: `NSE:PRODUCT:YYYY-MM-DD:FUT`, `NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE`,
+and instrument type: `NSE:PRODUCT:YYYY-MM-DD:FUT`, `NSE:PRODUCT:YYYY-MM-DD:STRIKE:CE`,
 `NSE:PRODUCT:YYYY-MM-DD:STRIKE:PE`, or `NSE:PRODUCT:EQ`. A request may send
-those parts as `underlying`, `expiry`, `strike`, and `right` (`FUT`, `C`, `P`,
+those parts as `underlying`, `expiry`, `strike`, and `instrumentType` (`FUT`, `C`, `P`,
 `CE`, `PE`, or `EQ`) and the route builds that symbol before the SPAN match.
 A position sends either that symbol or those fields. An empty book, a zero
 quantity, a repeated symbol, a non-positive option strike, and a position that

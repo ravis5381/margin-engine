@@ -62,8 +62,8 @@ struct PositionFile {
     expiry: Option<String>,
     #[serde(default)]
     strike: Option<String>,
-    #[serde(default)]
-    right: Option<String>,
+    #[serde(default, rename = "instrumentType")]
+    instrument_type: Option<String>,
     quantity: String,
 }
 
@@ -290,9 +290,6 @@ fn parse_reference(bytes: &[u8]) -> Result<Reference, String> {
     if file.positions.is_empty() {
         return Err("at least one position is required".to_owned());
     }
-    if file.positions.len() > 32 {
-        return Err("a margin quote accepts at most 32 positions".to_owned());
-    }
     let mut positions = Vec::with_capacity(file.positions.len());
     for position in &file.positions {
         let symbol = position_symbol(exchange, position)?;
@@ -324,7 +321,7 @@ fn position_symbol(exchange: Exchange, position: &PositionFile) -> Result<String
     let underlying = filled_ref(position.underlying.as_deref());
     let expiry = filled_ref(position.expiry.as_deref());
     let strike = filled_ref(position.strike.as_deref());
-    let right = filled_ref(position.right.as_deref());
+    let right = filled_ref(position.instrument_type.as_deref());
     let structured =
         underlying.is_some() || expiry.is_some() || strike.is_some() || right.is_some();
     let symbol = filled_ref(position.symbol.as_deref());
@@ -339,7 +336,7 @@ fn position_symbol(exchange: Exchange, position: &PositionFile) -> Result<String
             underlying.ok_or_else(|| "underlying must be the product code".to_owned())?,
             expiry,
             strike,
-            right.ok_or_else(|| "right must be FUT, C, P, CE, PE, or EQ".to_owned())?,
+            right.ok_or_else(|| "instrumentType must be FUT, C, P, CE, PE, or EQ".to_owned())?,
         ),
     }
 }
@@ -425,7 +422,7 @@ mod tests {
                 "trading_datetime": "2026-10-28T14:30:00+05:30",
                 "span_filename": "nsccl.20261028.i4.zip",
                 {extra}
-                "positions": [{{"underlying": "NIFTY", "expiry": "2026-11-23", "right": "FUT", "quantity": "-65"}}],
+                "positions": [{{"underlying": "NIFTY", "expiry": "2026-11-23", "instrumentType": "FUT", "quantity": "-65"}}],
                 "expected": {{
                     "span_margin": "1.00",
                     "extreme_loss_margin": "2",

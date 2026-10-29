@@ -41,7 +41,7 @@ This API does not replicate NSE Clearing or ICCL.";
     )),
     tags(
         (name = "margin", description = "SPAN margin, extreme loss margin, delivery margin, premium, and the total for one book."),
-        (name = "instruments", description = "Build the symbol the margin call matches. This does not return a margin.")
+        (name = "instruments", description = "Build the canonical symbol from the exchange, product, expiry, strike, and instrumentType. The margin call matches that symbol.")
     )
 )]
 struct ApiDoc;

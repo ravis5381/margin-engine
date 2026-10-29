@@ -80,7 +80,7 @@ first quote for a new date takes longer because those files are fetched then.
 
 ```bash
 curl -sS -m 180 -H 'content-type: application/json' \
-  -d '{"exchange":"BSE","trading_datetime":"2026-10-16T10:00:00+05:30","positions":[{"underlying":"SENSEX","expiry":"2026-11-26","right":"FUT","quantity":"-20"}]}' \
+  -d '{"exchange":"BSE","trading_datetime":"2026-10-16T10:00:00+05:30","positions":[{"underlying":"SENSEX","expiry":"2026-11-26","instrumentType":"FUT","quantity":"-20"}]}' \
   http://127.0.0.1:8080/api/v1/margin/calculate
 ```
 
