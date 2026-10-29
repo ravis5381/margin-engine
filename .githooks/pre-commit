@@ -1,0 +1,12 @@
+#!/bin/sh
+# The same formatting check as CI. A failing check rejects the commit.
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo is not on PATH, so cargo fmt --check did not run" >&2
+  exit 1
+fi
+
+cargo fmt --check

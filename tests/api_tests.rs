@@ -173,7 +173,8 @@ async fn openapi_documents_published_routes_and_swagger_ui_loads() {
     assert!(!paths.contains_key("/api/v1/data/status"));
     assert!(!paths.contains_key("/api/v1/risk-data/datasets"));
     assert_eq!(paths.len(), 2);
-    let margin_examples = &body["paths"]["/api/v1/margin/calculate"]["post"]["requestBody"]["content"]["application/json"]["examples"];
+    let margin_examples = &body["paths"]["/api/v1/margin/calculate"]["post"]["requestBody"]["content"]
+        ["application/json"]["examples"];
     assert!(margin_examples.get("Contract fields").is_some());
     assert!(margin_examples.get("Symbol").is_some());
     let margin_schema = &body["components"]["schemas"]["MarginResponse"];

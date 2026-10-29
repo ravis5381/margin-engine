@@ -288,9 +288,12 @@ pub struct MarginResponse {
     tag = "margin",
     operation_id = "calculateMargin",
     summary = "Quote margin for a book",
-    description = "Returns the margin for one book. Each position is either the contract fields or a `symbol`.\n\n\
-`margin.SPANMargin` is the scanning risk plus the calendar-spread charge, plus a short option premium, minus a long option premium. It is `0` when the long premium covers the scan. `margin.netPremium` is that premium with its sign and is not added again. `margin.totalMargin` is SPAN margin plus extreme loss margin plus delivery margin. A long option book whose premium covers the scan has SPAN `0` and a total equal to its delivery margin. `margin.elm` is the extreme loss margin, the same amount as `margin.exposureMargin`. Additional, tender, special, and pre-expiry margin are `0`. `margin.marginBenefit` is the saving from holding the positions together. `totalPositionMargin` is the sum of the position totals before that saving.\n\n\
-Each quote downloads SPAN snapshots for that trade date that are not already archived, including a snapshot published later the same day. The quote then uses the latest snapshot whose published time is at or before `trading_datetime`. A missing file or contract is an error. A calculated zero is `0`. This quote does not replicate NSE Clearing or ICCL.",
+    description = "\
+- Send contract fields or a symbol for each position.\n\
+- `SPANMargin` is the scan risk plus the calendar-spread charge. A sold option adds its premium. A bought option subtracts its premium, down to `0`. `netPremium` is that premium with its sign, already included in `SPANMargin`.\n\
+- `totalMargin` is `SPANMargin` plus `elm` plus `deliveryMargin`. `elm` and `exposureMargin` are the same extreme-loss amount. Additional, tender, special, and pre-expiry margin are `0`.\n\
+- `marginBenefit` is the saving from holding the positions together. `totalPositionMargin` is the sum of the position totals before that saving.\n\
+- The quote uses the latest SPAN file for that date published at or before `trading_datetime`, and downloads it when it is not already stored. A missing file or contract is an error. A calculated zero is `0`. This quote does not replicate NSE Clearing or ICCL.",
     request_body(
         content = MarginRequest,
         description = "Exchange, trade time, and the positions. A position sends contract fields or a symbol.",
